@@ -1,0 +1,59 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  ragvlm-service:
+    build:
+      context: .
+      dockerfile: infra/docker/ragvlm-service/Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "8001:8001"
+
+  video-service:
+    build:
+      context: .
+      dockerfile: infra/docker/video-service/Dockerfile
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8002:8002"
+
+  sam3-service:
+    build:
+      context: .
+      dockerfile: infra/docker/sam3-service/Dockerfile
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    ports:
+      - "8003:8003"
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: infra/docker/orchestrator/Dockerfile
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - ragvlm-service
+      - video-service
+      - sam3-service
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: infra/docker/frontend/Dockerfile
+    environment:
+      NEXT_PUBLIC_ORCHESTRATOR_URL: http://localhost:8000
+    depends_on:
+      - orchestrator
+    ports:
+      - "3000:3000"

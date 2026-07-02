@@ -1,0 +1,10 @@
+[project]
+name = "operatoros"
+version = "0.1.0"
+description = "OperatorOS multimodal orchestration platform."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["services/orchestrator/app", "services/video-service/app"]
+testpaths = ["tests"]
