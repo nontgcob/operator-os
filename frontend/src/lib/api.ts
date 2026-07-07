@@ -1,4 +1,9 @@
-import type { Annotation, MediaIngestResponse, TranscriptWindowResponse } from "@/lib/types";
+import type {
+  Annotation,
+  DocumentIngestResponse,
+  MediaIngestResponse,
+  TranscriptWindowResponse,
+} from "@/lib/types";
 
 const BASE_URL =
   process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ?? "http://localhost:8000";
@@ -84,15 +89,36 @@ export async function getTranscriptWindow(
   return response.json();
 }
 
+export async function uploadDocument(file: File): Promise<DocumentIngestResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  let response: Response;
+  try {
+    response = await fetch(`${BASE_URL}/documents/ingest`, {
+      method: "POST",
+      body: formData,
+    });
+  } catch (error) {
+    const message = error instanceof Error && error.message ? error.message : "network request failed";
+    throw new Error(`Unable to upload document for RAG: ${message}.`);
+  }
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+  return response.json();
+}
+
 export async function askQuestion(input: {
   session_id: string;
   video_id: string;
   timestamp: number;
   frame_data_url: string;
+  annotated_frame_data_url?: string;
   question: string;
   annotations: Annotation[];
   transcript_window: TranscriptWindowResponse;
   document_ids: string[];
+  model?: string;
 }): Promise<Response> {
   return fetch(`${BASE_URL}/chat/stream`, {
     method: "POST",

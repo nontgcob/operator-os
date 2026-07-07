@@ -56,6 +56,12 @@ def _log_event(event_type: str, **fields: Any) -> None:
     print(json.dumps({"event": event_type, "ts": time.time(), **fields}))
 
 
+def _sse(payload: str, event: str | None = None) -> str:
+    lines = payload.split("\n")
+    prefix = f"event: {event}\n" if event else ""
+    return prefix + "".join(f"data: {line}\n" for line in lines) + "\n"
+
+
 class TranscriptSegment(BaseModel):
     start: float
     end: float
@@ -74,10 +80,12 @@ class ChatStreamRequest(BaseModel):
     video_id: str
     timestamp: float
     frame_data_url: str
+    annotated_frame_data_url: str | None = None
     question: str
     annotations: list[dict[str, Any]] = Field(default_factory=list)
     transcript_window: TranscriptWindow
     document_ids: list[str] = Field(default_factory=list)
+    model: str | None = None
 
 
 class DocumentRetrieveRequest(BaseModel):
@@ -294,34 +302,49 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
     request_body = {
         "question": payload.question,
         "frame_data_url": payload.frame_data_url,
+        "annotated_frame_data_url": payload.annotated_frame_data_url,
         "annotations": payload.annotations,
         "transcript_segments": [segment.model_dump() for segment in payload.transcript_window.segments],
         "retrieved_chunks": retrieved_chunks,
         "conversation": _load_conversation(payload.session_id),
     }
+    if payload.model:
+        request_body["model"] = payload.model
 
     async def stream() -> Any:
         full_text = ""
-        async with httpx.AsyncClient(timeout=120) as client:
-            async with client.stream(
-                "POST",
-                f"{RAGVLM_SERVICE_URL}/ragvlm/infer",
-                json=request_body,
-            ) as response:
-                if response.status_code >= 400:
-                    text = await response.aread()
-                    raise HTTPException(status_code=response.status_code, detail=text.decode())
-                async for line in response.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    chunk = line[6:]
-                    if chunk == "[DONE]":
-                        break
-                    full_text += chunk
-                    yield f"data: {chunk}\n\n"
-                _append_conversation(payload.session_id, payload.question, full_text)
-                _log_event("inference_completed", session_id=payload.session_id, answer_len=len(full_text))
-                yield "data: [DONE]\n\n"
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                async with client.stream(
+                    "POST",
+                    f"{RAGVLM_SERVICE_URL}/ragvlm/infer",
+                    json=request_body,
+                ) as response:
+                    if response.status_code >= 400:
+                        text = await response.aread()
+                        yield _sse(f"RAGVLM returned HTTP {response.status_code}: {text.decode()}", event="error")
+                        return
+
+                    current_event = "message"
+                    async for line in response.aiter_lines():
+                        if line.startswith("event: "):
+                            current_event = line[7:]
+                            continue
+                        if not line.startswith("data: "):
+                            continue
+                        chunk = line[6:]
+                        if current_event == "error":
+                            yield _sse(chunk, event="error")
+                            return
+                        if chunk == "[DONE]":
+                            break
+                        full_text += chunk
+                        yield _sse(chunk)
+                    _append_conversation(payload.session_id, payload.question, full_text)
+                    _log_event("inference_completed", session_id=payload.session_id, answer_len=len(full_text))
+                    yield _sse("[DONE]")
+        except httpx.HTTPError as exc:
+            yield _sse(f"RAGVLM stream failed: {exc}", event="error")
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 

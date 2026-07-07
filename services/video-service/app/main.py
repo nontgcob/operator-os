@@ -142,6 +142,18 @@ def _fallback_transcript_segments(video_path: Path) -> list[dict[str, float | st
     return segments
 
 
+def _is_fallback_transcript(segments: list[dict[str, Any]]) -> bool:
+    if not segments:
+        return False
+    return all(str(segment.get("text", "")).startswith("Fallback transcript segment") for segment in segments)
+
+
+def _transcript_source(segments: list[dict[str, Any]]) -> str:
+    if _is_fallback_transcript(segments):
+        return "fallback"
+    return "whisper" if segments else "empty"
+
+
 def _extract_transcript(video_id: str, video_path: Path) -> list[dict[str, float | str]]:
     segments = _transcribe_with_whisper(video_path)
     if not segments:
@@ -729,7 +741,23 @@ async def transcript_window(video_id: str, timestamp: float, before: float = 30,
     start = max(0, timestamp - before)
     end = timestamp + after
     window = [segment for segment in segments if segment["end"] >= start and segment["start"] <= end]
-    return {"timestamp": timestamp, "start": start, "end": end, "segments": window}
+    source = _transcript_source(segments)
+    warning = None
+    if source == "fallback":
+        warning = (
+            "This video has fallback timestamp transcript segments. "
+            "Enable WHISPER_ENABLED=true and re-ingest the video for real speech transcription."
+        )
+    return {
+        "timestamp": timestamp,
+        "start": start,
+        "end": end,
+        "segments": window,
+        "source": source,
+        "whisper_enabled": WHISPER_ENABLED,
+        "model": WHISPER_MODEL_NAME if WHISPER_ENABLED else None,
+        "warning": warning,
+    }
 
 
 @app.get("/video/index")

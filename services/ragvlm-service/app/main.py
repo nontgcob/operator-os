@@ -28,6 +28,12 @@ OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", "http://localhost
 OPENROUTER_APP_TITLE = os.getenv("OPENROUTER_APP_TITLE", "OperatorOS")
 
 
+def _sse(payload: str, event: str | None = None) -> str:
+    lines = payload.split("\n")
+    prefix = f"event: {event}\n" if event else ""
+    return prefix + "".join(f"data: {line}\n" for line in lines) + "\n"
+
+
 class TranscriptSegment(BaseModel):
     start: float
     end: float
@@ -37,6 +43,7 @@ class TranscriptSegment(BaseModel):
 class InferRequest(BaseModel):
     question: str
     frame_data_url: str
+    annotated_frame_data_url: str | None = None
     annotations: list[dict[str, Any]] = Field(default_factory=list)
     transcript_segments: list[TranscriptSegment] = Field(default_factory=list)
     retrieved_chunks: list[str] = Field(default_factory=list)
@@ -113,13 +120,22 @@ async def infer(payload: InferRequest) -> StreamingResponse:
     system_prompt = _build_prompt(payload)
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     messages.extend(payload.conversation[-12:])
+    user_content: list[dict[str, Any]] = [
+        {"type": "text", "text": "Original video frame:"},
+        {"type": "image_url", "image_url": {"url": payload.frame_data_url}},
+    ]
+    if payload.annotated_frame_data_url:
+        user_content.extend(
+            [
+                {"type": "text", "text": "Same frame with user annotations overlaid:"},
+                {"type": "image_url", "image_url": {"url": payload.annotated_frame_data_url}},
+            ]
+        )
+    user_content.append({"type": "text", "text": payload.question})
     messages.append(
         {
             "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": payload.frame_data_url}},
-                {"type": "text", "text": payload.question},
-            ],
+            "content": user_content,
         }
     )
 
@@ -132,27 +148,31 @@ async def infer(payload: InferRequest) -> StreamingResponse:
         request_body["reasoning"] = {"effort": "low"}
 
     async def stream() -> Any:
-        async with httpx.AsyncClient(timeout=90) as client:
-            async with client.stream(
-                "POST",
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": OPENROUTER_HTTP_REFERER,
-                    "X-Title": OPENROUTER_APP_TITLE,
-                },
-                json=request_body,
-            ) as response:
-                if response.status_code >= 400:
-                    text = await response.aread()
-                    raise HTTPException(status_code=response.status_code, detail=text.decode())
-                async for line in response.aiter_lines():
-                    parsed = parse_openrouter_sse_line(line)
-                    if parsed == DONE_SENTINEL:
-                        yield "data: [DONE]\n\n"
-                        break
-                    if parsed:
-                        yield f"data: {parsed}\n\n"
+        try:
+            async with httpx.AsyncClient(timeout=90) as client:
+                async with client.stream(
+                    "POST",
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": OPENROUTER_HTTP_REFERER,
+                        "X-Title": OPENROUTER_APP_TITLE,
+                    },
+                    json=request_body,
+                ) as response:
+                    if response.status_code >= 400:
+                        text = await response.aread()
+                        yield _sse(f"OpenRouter returned HTTP {response.status_code}: {text.decode()}", event="error")
+                        return
+                    async for line in response.aiter_lines():
+                        parsed = parse_openrouter_sse_line(line)
+                        if parsed == DONE_SENTINEL:
+                            yield _sse("[DONE]")
+                            break
+                        if parsed:
+                            yield _sse(parsed)
+        except httpx.HTTPError as exc:
+            yield _sse(f"OpenRouter stream failed: {exc}", event="error")
 
     return StreamingResponse(stream(), media_type="text/event-stream")

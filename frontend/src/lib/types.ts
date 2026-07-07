@@ -57,10 +57,20 @@ export interface TranscriptWindowResponse {
   start: number;
   end: number;
   segments: Array<{ start: number; end: number; text: string }>;
+  source?: "whisper" | "fallback" | "empty";
+  whisper_enabled?: boolean;
+  model?: string | null;
+  warning?: string | null;
 }
 
 export interface MediaIngestResponse {
   video_id: string;
+}
+
+export interface DocumentIngestResponse {
+  document_id: string;
+  filename: string;
+  chunk_count: number;
 }
 
 export interface TrackingOverlay {

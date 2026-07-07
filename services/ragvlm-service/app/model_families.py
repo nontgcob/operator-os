@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-DEFAULT_MODEL = "google/gemini-3.1-pro-preview"
+DEFAULT_MODEL = "qwen/qwen3-vl-8b-instruct"
 
 MODEL_FAMILIES = {
     "gemini": {
         "models": {
-            DEFAULT_MODEL,
+            "google/gemini-3.1-pro-preview",
             "google/gemini-3-flash-preview",
         },
         "text_model": "google/gemini-3-flash-preview",
-        "image_model": DEFAULT_MODEL,
+        "image_model": "google/gemini-3.1-pro-preview",
         "image_fast_model": "google/gemini-3-flash-preview",
         "supports_images": True,
         "supports_documents": True,
@@ -47,4 +47,4 @@ def model_family_for(model: str) -> str:
 
 
 def model_supports_reasoning(model: str) -> bool:
-    return model == DEFAULT_MODEL
+    return model == "google/gemini-3.1-pro-preview"

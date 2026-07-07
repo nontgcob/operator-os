@@ -67,6 +67,32 @@ def test_transcript_window_filters_segments(tmp_path: Path) -> None:
     assert payload["end"] == 12.0
     assert len(payload["segments"]) == 2
     assert [segment["text"] for segment in payload["segments"]] == ["b", "c"]
+    assert payload["source"] == "whisper"
+    assert payload["warning"] is None
+
+
+def test_transcript_window_reports_fallback_source(tmp_path: Path) -> None:
+    module = _load_video_module()
+    module.BASE_DIR = tmp_path
+    module.BASE_DIR.mkdir(parents=True, exist_ok=True)
+    client = TestClient(module.app)
+
+    video_id = "v-fallback"
+    video_dir = module._video_dir(video_id)
+    transcript = [
+        {"start": 0.0, "end": 5.0, "text": "Fallback transcript segment from 0.0s to 5.0s."},
+    ]
+    (video_dir / "transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
+
+    response = client.get(
+        "/transcript/window",
+        params={"video_id": video_id, "timestamp": 2.0, "before": 1.0, "after": 1.0},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] == "fallback"
+    assert "re-ingest" in payload["warning"]
 
 
 def test_extract_transcript_uses_whisper_segments(tmp_path: Path, monkeypatch) -> None:

@@ -37,10 +37,11 @@ When answering questions:
 OPERATOROS_VIDEO_CONTEXT = """You are OperatorOS, an industrial multimodal assistant adapted from RAGVLM for video reasoning.
 - Ground every answer in the visible video frame first.
 - Treat user annotations as intent signals in normalized RAGVLM 0-1000 image coordinates.
+- If a second annotated frame image is provided, use it only as visual guidance for the user's marks; the original frame remains the source image.
 - Use transcript excerpts for temporal context and document excerpts for procedural evidence.
 - Explain spatial relationships precisely when annotations are present.
 - If the frame, transcript, or documents do not support an answer, say what is uncertain.
-- Return normal markdown text for now; visual SketchVLM overlays will be parsed in a later OperatorOS layer.
+- Return SketchVLM JSON so OperatorOS can render your visual explanation as an overlay on the video frame.
 """
 
 
@@ -60,7 +61,7 @@ def build_prompt(
     *,
     model_family: str = "custom",
 ) -> str:
-    base_prompt = f"{OPERATOROS_VIDEO_CONTEXT}\n\n{RAG_SYSTEM_PROMPT}"
+    base_prompt = f"{OPERATOROS_VIDEO_CONTEXT}\n\n{SKETCHVLM_SYSTEM_PROMPT}\n\n{RAG_SYSTEM_PROMPT}"
     return (
         f"{base_prompt}\n\n"
         f"Model family: {model_family}\n\n"
@@ -69,7 +70,8 @@ def build_prompt(
         f"Transcript window:\n{transcript}\n\n"
         f"## Retrieved context\n\n{docs}\n\n"
         "Answer requirements:\n"
-        "- Be concise but cite the visual, temporal, or document evidence you used.\n"
+        "- The JSON answer field may contain concise markdown-style prose, but the full response must still be valid JSON.\n"
+        "- Use annotations to highlight the visible evidence that supports the answer.\n"
         "- Do not invent manual details that are absent from the retrieved excerpts.\n"
         "- When relevant, mention the annotated region using the normalized coordinate frame."
     )
