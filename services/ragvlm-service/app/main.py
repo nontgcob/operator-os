@@ -1,14 +1,25 @@
 from __future__ import annotations
 
-import json
 import os
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from prompts import build_prompt
+
+try:
+    from .annotations import normalize_annotations
+    from .model_families import DEFAULT_MODEL, model_family_for
+    from .parse_response import DONE_SENTINEL, parse_openrouter_sse_line
+    from .prompts import build_prompt
+    from .rag.retrieval import extract_text_from_bytes, ingest_document_text, retrieve_chunks
+except ImportError:
+    from annotations import normalize_annotations
+    from model_families import DEFAULT_MODEL, model_family_for
+    from parse_response import DONE_SENTINEL, parse_openrouter_sse_line
+    from prompts import build_prompt
+    from rag.retrieval import extract_text_from_bytes, ingest_document_text, retrieve_chunks
 
 app = FastAPI(title="OperatorOS RAGVLM Service", version="0.1.0")
 
@@ -29,22 +40,69 @@ class InferRequest(BaseModel):
     annotations: list[dict[str, Any]] = Field(default_factory=list)
     transcript_segments: list[TranscriptSegment] = Field(default_factory=list)
     retrieved_chunks: list[str] = Field(default_factory=list)
+    document_ids: list[str] = Field(default_factory=list)
     conversation: list[dict[str, str]] = Field(default_factory=list)
-    model: str = "google/gemini-3.1-pro-preview"
+    model: str = DEFAULT_MODEL
+
+
+class DocumentRetrieveRequest(BaseModel):
+    question: str
+    document_ids: list[str] = Field(default_factory=list)
+    top_k: int = Field(default=4, ge=1, le=12)
 
 
 def _build_prompt(payload: InferRequest) -> str:
     transcript = "\n".join(
         f"[{segment.start:.2f}-{segment.end:.2f}] {segment.text}"
         for segment in payload.transcript_segments
+    ) or "No transcript."
+    retrieved = list(payload.retrieved_chunks)
+    if payload.document_ids:
+        retrieved.extend(
+            f"{chunk['filename']}#{chunk['index']}: {chunk['text']}"
+            for chunk in retrieve_chunks(payload.question, payload.document_ids)
+        )
+    docs = "\n\n".join(retrieved) if retrieved else "No retrieved document excerpts."
+    return build_prompt(
+        payload.question,
+        normalize_annotations(payload.annotations),
+        transcript,
+        docs,
+        model_family=model_family_for(payload.model),
     )
-    docs = "\n".join(payload.retrieved_chunks) if payload.retrieved_chunks else "No manuals."
-    return build_prompt(payload.question, json.dumps(payload.annotations), transcript, docs)
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/documents/ingest")
+async def ingest_document(
+    file: UploadFile = File(...),
+    document_id: str | None = None,
+) -> dict[str, Any]:
+    data = await file.read()
+    try:
+        text = extract_text_from_bytes(file.filename or "document", file.content_type, data)
+        return ingest_document_text(
+            text,
+            filename=file.filename or "document",
+            document_id=document_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/documents/retrieve")
+async def retrieve_document_chunks(payload: DocumentRetrieveRequest) -> dict[str, Any]:
+    return {
+        "chunks": retrieve_chunks(
+            payload.question,
+            payload.document_ids,
+            top_k=payload.top_k,
+        )
+    }
 
 
 @app.post("/ragvlm/infer")
@@ -88,19 +146,11 @@ async def infer(payload: InferRequest) -> StreamingResponse:
                     text = await response.aread()
                     raise HTTPException(status_code=response.status_code, detail=text.decode())
                 async for line in response.aiter_lines():
-                    if not line:
-                        continue
-                    if line.startswith("data: "):
-                        payload_line = line[6:].strip()
-                        if payload_line == "[DONE]":
-                            yield "data: [DONE]\n\n"
-                            break
-                        try:
-                            parsed = json.loads(payload_line)
-                            delta = parsed["choices"][0]["delta"].get("content", "")
-                            if delta:
-                                yield f"data: {delta}\n\n"
-                        except Exception:
-                            continue
+                    parsed = parse_openrouter_sse_line(line)
+                    if parsed == DONE_SENTINEL:
+                        yield "data: [DONE]\n\n"
+                        break
+                    if parsed:
+                        yield f"data: {parsed}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")

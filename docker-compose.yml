@@ -9,7 +9,8 @@ services:
       context: .
       dockerfile: infra/docker/ragvlm-service/Dockerfile
     env_file:
-      - .env
+      - path: .env
+        required: false
     ports:
       - "8001:8001"
 
@@ -17,6 +18,9 @@ services:
     build:
       context: .
       dockerfile: infra/docker/video-service/Dockerfile
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - ./data:/app/data
     ports:
@@ -27,7 +31,10 @@ services:
       context: .
       dockerfile: infra/docker/sam3-service/Dockerfile
     env_file:
-      - .env
+      - path: .env
+        required: false
+    volumes:
+      - ./data:/app/data
     depends_on:
       - redis
     ports:
@@ -38,7 +45,8 @@ services:
       context: .
       dockerfile: infra/docker/orchestrator/Dockerfile
     env_file:
-      - .env
+      - path: .env
+        required: false
     depends_on:
       - redis
       - ragvlm-service
@@ -46,6 +54,17 @@ services:
       - sam3-service
     ports:
       - "8000:8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/docker/worker/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      - redis
+      - sam3-service
 
   frontend:
     build:

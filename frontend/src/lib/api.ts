@@ -1,17 +1,72 @@
-import type { Annotation, TranscriptWindowResponse } from "@/lib/types";
+import type { Annotation, MediaIngestResponse, TranscriptWindowResponse } from "@/lib/types";
 
 const BASE_URL =
   process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ?? "http://localhost:8000";
 
-export async function uploadMedia(file: File): Promise<{ video_id: string }> {
+async function readApiError(response: Response): Promise<string> {
+  const text = await response.text();
+  if (!text) return `Request failed with status ${response.status}`;
+  try {
+    const parsed = JSON.parse(text) as { detail?: unknown };
+    if (typeof parsed.detail === "string") {
+      try {
+        const nested = JSON.parse(parsed.detail) as { detail?: unknown };
+        if (typeof nested.detail === "string") return nested.detail;
+      } catch {
+        // The detail is already plain text.
+      }
+      return parsed.detail;
+    }
+    if (parsed.detail) return JSON.stringify(parsed.detail);
+  } catch {
+    // Fall through to the plain response body.
+  }
+  return text;
+}
+
+function mediaIngestNetworkError(error: unknown): Error {
+  const message = error instanceof Error && error.message ? error.message : "network request failed";
+  return new Error(
+    `Unable to reach orchestrator while starting media ingest: ${message}. ` +
+      "Large YouTube downloads and first-run transcription can take several minutes; check backend logs and retry."
+  );
+}
+
+export function getMediaSourceUrl(videoId: string): string {
+  return `${BASE_URL}/media/source?video_id=${encodeURIComponent(videoId)}`;
+}
+
+export async function uploadMedia(file: File): Promise<MediaIngestResponse> {
   const formData = new FormData();
   formData.append("file", file);
-  const response = await fetch(`${BASE_URL}/media/ingest`, {
-    method: "POST",
-    body: formData,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${BASE_URL}/media/ingest`, {
+      method: "POST",
+      body: formData,
+    });
+  } catch (error) {
+    throw mediaIngestNetworkError(error);
+  }
   if (!response.ok) {
-    throw new Error(await response.text());
+    throw new Error(await readApiError(response));
+  }
+  return response.json();
+}
+
+export async function ingestYoutubeUrl(youtubeUrl: string): Promise<MediaIngestResponse> {
+  let response: Response;
+  try {
+    response = await fetch(`${BASE_URL}/media/ingest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ youtube_url: youtubeUrl }),
+    });
+  } catch (error) {
+    throw mediaIngestNetworkError(error);
+  }
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
   }
   return response.json();
 }
@@ -24,7 +79,7 @@ export async function getTranscriptWindow(
     `${BASE_URL}/transcript/window?video_id=${encodeURIComponent(videoId)}&timestamp=${timestamp}`
   );
   if (!response.ok) {
-    throw new Error(await response.text());
+    throw new Error(await readApiError(response));
   }
   return response.json();
 }
@@ -60,7 +115,7 @@ export async function startTracking(input: {
     body: JSON.stringify(input),
   });
   if (!response.ok) {
-    throw new Error(await response.text());
+    throw new Error(await readApiError(response));
   }
   return response.json();
 }
