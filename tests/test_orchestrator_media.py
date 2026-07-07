@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -29,6 +30,7 @@ class _FakeAsyncClient:
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.requests: list[dict[str, Any]] = []
+        self.closed = False
         self.timeout = kwargs.get("timeout", args[0] if args else None)
         self.instances.append(self)
 
@@ -41,6 +43,9 @@ class _FakeAsyncClient:
     async def post(self, url: str, **kwargs: Any) -> _FakeResponse:
         self.requests.append({"url": url, **kwargs})
         return _FakeResponse()
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 def test_media_ingest_accepts_youtube_json(monkeypatch) -> None:
@@ -109,3 +114,26 @@ def test_media_ingest_timeout_returns_actionable_504(monkeypatch) -> None:
     assert "timed out after 45s" in detail
     assert "MEDIA_INGEST_TIMEOUT_SECONDS" in detail
     assert "WHISPER_ENABLED=false" in detail
+
+
+def test_media_source_closes_client_when_send_fails(monkeypatch) -> None:
+    module = _load_orchestrator_module()
+
+    class SendFailingAsyncClient(_FakeAsyncClient):
+        def build_request(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+            request = {"method": method, "url": url, **kwargs}
+            self.requests.append(request)
+            return request
+
+        async def send(self, request: dict[str, Any], **kwargs: Any) -> None:
+            self.requests.append({"request": request, **kwargs})
+            raise module.httpx.ConnectError("video-service unavailable")
+
+    SendFailingAsyncClient.instances = []
+    monkeypatch.setattr(module.httpx, "AsyncClient", SendFailingAsyncClient)
+    client = TestClient(module.app)
+
+    with pytest.raises(module.httpx.ConnectError):
+        client.get("/media/source", params={"video_id": "video-1"})
+
+    assert SendFailingAsyncClient.instances[0].closed is True

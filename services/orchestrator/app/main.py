@@ -195,26 +195,31 @@ async def media_source(video_id: str, request: Request) -> StreamingResponse:
         headers["Range"] = range_header
 
     client = httpx.AsyncClient(timeout=None)
-    upstream = await client.send(
-        client.build_request(
-            "GET",
-            f"{VIDEO_SERVICE_URL}/media/source",
-            params={"video_id": video_id},
-            headers=headers,
-        ),
-        stream=True,
-    )
-    if upstream.status_code >= 400:
-        text = await upstream.aread()
-        await upstream.aclose()
-        await client.aclose()
-        raise HTTPException(status_code=upstream.status_code, detail=text.decode())
+    upstream: httpx.Response | None = None
+    try:
+        upstream = await client.send(
+            client.build_request(
+                "GET",
+                f"{VIDEO_SERVICE_URL}/media/source",
+                params={"video_id": video_id},
+                headers=headers,
+            ),
+            stream=True,
+        )
+        if upstream.status_code >= 400:
+            text = await upstream.aread()
+            raise HTTPException(status_code=upstream.status_code, detail=text.decode())
 
-    passthrough_headers = {
-        key: value
-        for key, value in upstream.headers.items()
-        if key.lower() in {"accept-ranges", "content-length", "content-range", "content-type"}
-    }
+        passthrough_headers = {
+            key: value
+            for key, value in upstream.headers.items()
+            if key.lower() in {"accept-ranges", "content-length", "content-range", "content-type"}
+        }
+    except BaseException:
+        if upstream is not None:
+            await upstream.aclose()
+        await client.aclose()
+        raise
 
     async def stream() -> Any:
         try:
