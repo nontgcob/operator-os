@@ -10,13 +10,13 @@ from pydantic import BaseModel, Field
 
 try:
     from .annotations import normalize_annotations
-    from .model_families import DEFAULT_MODEL, model_family_for
+    from .model_families import DEFAULT_MODEL, model_family_for, model_supports_reasoning
     from .parse_response import DONE_SENTINEL, parse_openrouter_sse_line
     from .prompts import build_prompt
     from .rag.retrieval import extract_text_from_bytes, ingest_document_text, retrieve_chunks
 except ImportError:
     from annotations import normalize_annotations
-    from model_families import DEFAULT_MODEL, model_family_for
+    from model_families import DEFAULT_MODEL, model_family_for, model_supports_reasoning
     from parse_response import DONE_SENTINEL, parse_openrouter_sse_line
     from prompts import build_prompt
     from rag.retrieval import extract_text_from_bytes, ingest_document_text, retrieve_chunks
@@ -128,6 +128,8 @@ async def infer(payload: InferRequest) -> StreamingResponse:
         "messages": messages,
         "stream": True,
     }
+    if model_supports_reasoning(payload.model):
+        request_body["reasoning"] = {"effort": "low"}
 
     async def stream() -> Any:
         async with httpx.AsyncClient(timeout=90) as client:

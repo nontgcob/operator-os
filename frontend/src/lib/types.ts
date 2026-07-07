@@ -1,4 +1,20 @@
-export type AnnotationType = "rect" | "circle" | "path" | "text";
+export type AnnotationType =
+  | "cursor"
+  | "select"
+  | "pen"
+  | "arrow"
+  | "rect"
+  | "circle"
+  | "eraser"
+  | "text";
+export type AnnotationPrimitiveType =
+  | "arrow"
+  | "rect"
+  | "circle"
+  | "text"
+  | "path"
+  | "polygon"
+  | "number";
 
 export interface Point {
   x: number;
@@ -6,16 +22,35 @@ export interface Point {
 }
 
 export interface Annotation {
-  type: AnnotationType;
+  type: AnnotationPrimitiveType;
   color: string;
-  points?: Point[];
+  coordinate_space?: "ragvlm_0_1000";
+  strokeWidth?: number;
+  fill?: string;
+  points?: Array<Point | number[]>;
   x?: number;
   y?: number;
   width?: number;
   height?: number;
+  cx?: number;
+  cy?: number;
+  r?: number;
   radius?: number;
   text?: string;
+  content?: string;
+  fontSize?: number;
+  value?: number;
+  x1?: number;
+  y1?: number;
+  x2?: number;
+  y2?: number;
+  d?: string;
 }
+
+export type AnnotationUndoEntry =
+  | { op: "pop"; count: number }
+  | { op: "insert"; idx: number; annotation: Annotation }
+  | { op: "replace"; idx: number; previous: Annotation };
 
 export interface TranscriptWindowResponse {
   timestamp: number;

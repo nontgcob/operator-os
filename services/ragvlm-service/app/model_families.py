@@ -6,25 +6,33 @@ MODEL_FAMILIES = {
     "gemini": {
         "models": {
             DEFAULT_MODEL,
-            "google/gemini-2.5-pro",
-            "google/gemini-2.5-flash",
+            "google/gemini-3-flash-preview",
         },
+        "text_model": "google/gemini-3-flash-preview",
+        "image_model": DEFAULT_MODEL,
+        "image_fast_model": "google/gemini-3-flash-preview",
         "supports_images": True,
         "supports_documents": True,
     },
-    "openai": {
+    "gpt": {
         "models": {
-            "openai/gpt-4.1",
-            "openai/gpt-4.1-mini",
+            "openai/gpt-5-chat",
+            "openai/gpt-5-mini",
         },
+        "text_model": "openai/gpt-5-mini",
+        "image_model": "openai/gpt-5-chat",
+        "image_fast_model": "openai/gpt-5-mini",
         "supports_images": True,
         "supports_documents": True,
     },
-    "anthropic": {
+    "qwen": {
         "models": {
-            "anthropic/claude-sonnet-4",
-            "anthropic/claude-3.7-sonnet",
+            "qwen/qwen3-vl-235b-a22b-instruct",
+            "qwen/qwen3-vl-8b-instruct",
         },
+        "text_model": "qwen/qwen3-vl-8b-instruct",
+        "image_model": "qwen/qwen3-vl-235b-a22b-instruct",
+        "image_fast_model": "qwen/qwen3-vl-8b-instruct",
         "supports_images": True,
         "supports_documents": True,
     },
@@ -36,3 +44,7 @@ def model_family_for(model: str) -> str:
         if model in config["models"]:
             return family
     return "custom"
+
+
+def model_supports_reasoning(model: str) -> bool:
+    return model == DEFAULT_MODEL

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Protocol
@@ -389,35 +390,67 @@ def outputs_to_overlays(outputs: Any, timestamp: float) -> list[dict[str, Any]]:
 
 def _annotation_box(annotation: dict[str, Any]) -> list[float] | None:
     annotation_type = annotation.get("type")
+    coordinate_scale = _annotation_coordinate_scale(annotation)
     if annotation_type == "rect":
         return _box_from_values(
             annotation.get("x"),
             annotation.get("y"),
             annotation.get("width"),
             annotation.get("height"),
+            coordinate_scale=coordinate_scale,
         )
     if annotation_type == "circle":
-        x = _number(annotation.get("x"))
-        y = _number(annotation.get("y"))
-        radius = _number(annotation.get("radius"))
+        x = _number(annotation.get("cx", annotation.get("x")))
+        y = _number(annotation.get("cy", annotation.get("y")))
+        radius = _number(annotation.get("r", annotation.get("radius")))
         if x is None or y is None or radius is None:
             return None
-        return _box_from_values(x - radius, y - radius, radius * 2, radius * 2)
-    if annotation_type == "path":
+        return _box_from_values(
+            x - radius,
+            y - radius,
+            radius * 2,
+            radius * 2,
+            coordinate_scale=coordinate_scale,
+        )
+    if annotation_type in {"path", "polygon"}:
         points = annotation.get("points")
-        if not isinstance(points, list) or not points:
-            return None
-        xs = [_number(point.get("x")) for point in points if isinstance(point, dict)]
-        ys = [_number(point.get("y")) for point in points if isinstance(point, dict)]
-        xs = [value for value in xs if value is not None]
-        ys = [value for value in ys if value is not None]
+        xs, ys = _points_xy(points)
+        if annotation_type == "path" and not xs and isinstance(annotation.get("d"), str):
+            xs, ys = _path_xy(annotation["d"])
         if not xs or not ys:
             return None
-        return _box_from_values(min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
+        return _box_from_values(
+            min(xs),
+            min(ys),
+            max(xs) - min(xs),
+            max(ys) - min(ys),
+            coordinate_scale=coordinate_scale,
+        )
+    if annotation_type == "arrow":
+        x1 = _number(annotation.get("x1"))
+        y1 = _number(annotation.get("y1"))
+        x2 = _number(annotation.get("x2"))
+        y2 = _number(annotation.get("y2"))
+        if x1 is None or y1 is None or x2 is None or y2 is None:
+            return None
+        return _box_from_values(
+            min(x1, x2),
+            min(y1, y2),
+            abs(x2 - x1),
+            abs(y2 - y1),
+            coordinate_scale=coordinate_scale,
+        )
     return None
 
 
-def _box_from_values(x: Any, y: Any, width: Any, height: Any) -> list[float] | None:
+def _box_from_values(
+    x: Any,
+    y: Any,
+    width: Any,
+    height: Any,
+    *,
+    coordinate_scale: float = 100.0,
+) -> list[float] | None:
     x_value = _number(x)
     y_value = _number(y)
     width_value = _number(width)
@@ -427,13 +460,53 @@ def _box_from_values(x: Any, y: Any, width: Any, height: Any) -> list[float] | N
     if width_value <= 0 or height_value <= 0:
         return None
 
-    x_min = _clamp_percent(x_value)
-    y_min = _clamp_percent(y_value)
-    x_max = _clamp_percent(x_value + width_value)
-    y_max = _clamp_percent(y_value + height_value)
+    x_min = _clamp_percent((x_value / coordinate_scale) * 100)
+    y_min = _clamp_percent((y_value / coordinate_scale) * 100)
+    x_max = _clamp_percent(((x_value + width_value) / coordinate_scale) * 100)
+    y_max = _clamp_percent(((y_value + height_value) / coordinate_scale) * 100)
     if x_max <= x_min or y_max <= y_min:
         return None
     return [x_min / 100, y_min / 100, (x_max - x_min) / 100, (y_max - y_min) / 100]
+
+
+def _annotation_coordinate_scale(annotation: dict[str, Any]) -> float:
+    if annotation.get("coordinate_space") == "ragvlm_0_1000":
+        return 1000.0
+    values: list[float] = []
+    for key in ("x", "y", "cx", "cy", "r", "radius", "x1", "y1", "x2", "y2", "width", "height"):
+        value = _number(annotation.get(key))
+        if value is not None:
+            values.append(value)
+    xs, ys = _points_xy(annotation.get("points"))
+    values.extend(xs)
+    values.extend(ys)
+    return 1000.0 if values and max(values) > 100 else 100.0
+
+
+def _points_xy(points: Any) -> tuple[list[float], list[float]]:
+    if not isinstance(points, list):
+        return [], []
+    xs: list[float] = []
+    ys: list[float] = []
+    for point in points:
+        if isinstance(point, dict):
+            x = _number(point.get("x"))
+            y = _number(point.get("y"))
+        elif isinstance(point, list) and len(point) >= 2:
+            x = _number(point[0])
+            y = _number(point[1])
+        else:
+            continue
+        if x is not None and y is not None:
+            xs.append(x)
+            ys.append(y)
+    return xs, ys
+
+
+def _path_xy(path: str) -> tuple[list[float], list[float]]:
+    numbers = [_number(match) for match in re.findall(r"[-+]?\d*\.?\d+", path)]
+    values = [number for number in numbers if number is not None]
+    return values[0::2], values[1::2]
 
 
 def _xywh_to_points(box: list[Any]) -> list[dict[str, float]]:

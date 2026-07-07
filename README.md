@@ -21,6 +21,7 @@ OperatorOS is a video-first multimodal orchestration platform built around a reu
 ## Demo configuration
 
 - Set `OPENROUTER_API_KEY` before using contextual chat.
+- RAGVLM document ingestion uses the upstream-style OpenRouter embeddings path with `RAGVLM_EMBEDDING_MODEL` (default `openai/text-embedding-3-small`) and stores a local JSON index under `RAGVLM_DOCUMENT_DIR`.
 - Whisper transcription uses `WHISPER_MODEL` and falls back to deterministic timestamped segments if Whisper cannot run.
 - YouTube URL ingestion is handled by `video-service` with `yt-dlp`, `ffmpeg`, yt-dlp EJS support, Deno, and the `curl-cffi` extra for optional yt-dlp-supported request impersonation. `YTDLP_JS_RUNTIME=deno:/usr/local/bin/deno` enables the installed Deno runtime explicitly, and `YTDLP_REMOTE_COMPONENTS=ejs:github` allows yt-dlp to fetch current EJS challenge solver scripts when the packaged components are stale. Check `http://localhost:8002/diagnostics/ytdlp` after rebuild to confirm runtime availability.
 - Cookie-free public-video tuning is available through `YTDLP_EXTRACTOR_ARGS`, `YTDLP_YOUTUBE_PLAYER_CLIENTS` (for example `mweb,default`), `YTDLP_YOUTUBE_FETCH_PO_TOKEN` (`auto`, `always`, or `never`), and `YTDLP_PO_TOKEN_PROVIDER_ARGS` (for example `youtubepot-bgutilhttp:base_url=http://po-token-provider:4416`). PO Token Provider plugins are not bundled; install a maintained provider in a custom image or environment, then pass its provider-specific args with these env vars.

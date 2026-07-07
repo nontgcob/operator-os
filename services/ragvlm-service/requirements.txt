@@ -4,3 +4,4 @@ httpx
 pydantic
 python-multipart
 pypdf
+python-docx

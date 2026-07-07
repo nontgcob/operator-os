@@ -46,5 +46,5 @@ def test_prompt_includes_ragvlm_grounding_sections() -> None:
     assert "RAGVLM 0-1000 image coordinates" in prompt
     assert "Model family: gemini" in prompt
     assert "Normalized annotations:" in prompt
-    assert "Retrieved document excerpts:" in prompt
+    assert "## Retrieved context" in prompt
     assert "lower valve before calibration" in prompt

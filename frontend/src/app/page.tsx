@@ -14,6 +14,7 @@ import {
 } from "@/lib/api";
 import type {
   Annotation,
+  AnnotationUndoEntry,
   AnnotationType,
   TrackingOverlay,
   TranscriptWindowResponse,
@@ -51,6 +52,7 @@ export default function Home() {
   const [ingestStatus, setIngestStatus] = useState("");
   const [pendingVideoReadyStatus, setPendingVideoReadyStatus] = useState("");
   const [videoMetadataLoaded, setVideoMetadataLoaded] = useState(false);
+  const [videoAspectRatio, setVideoAspectRatio] = useState(1);
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [timestamp, setTimestamp] = useState(0);
   const [transcriptWindow, setTranscriptWindow] = useState<TranscriptWindowResponse | null>(null);
@@ -59,7 +61,10 @@ export default function Home() {
   const [trackingEnabled, setTrackingEnabled] = useState(true);
   const [showTrackingOverlays, setShowTrackingOverlays] = useState(true);
   const [isPaused, setIsPaused] = useState(false);
-  const [activeTool, setActiveTool] = useState<AnnotationType>("rect");
+  const [activeTool, setActiveTool] = useState<AnnotationType>("cursor");
+  const [annotationUndoStack, setAnnotationUndoStack] = useState<AnnotationUndoEntry[]>([]);
+  const [drawColor, setDrawColor] = useState("#ff6b6b");
+  const [strokeWidth, setStrokeWidth] = useState(3);
   const [textAnnotation, setTextAnnotation] = useState("");
 
   const currentOverlay = useMemo(() => {
@@ -72,12 +77,40 @@ export default function Home() {
     setVideoUrl("");
     setVideoId("");
     setVideoMetadataLoaded(false);
+    setVideoAspectRatio(1);
     setPendingVideoReadyStatus("");
     setTimestamp(0);
     setTranscriptWindow(null);
     setAnnotations([]);
+    setAnnotationUndoStack([]);
     setTrackingOverlays([]);
     setAnswer("");
+  }
+
+  function clearAnnotations() {
+    setAnnotations([]);
+    setAnnotationUndoStack([]);
+  }
+
+  function undoAnnotation() {
+    const entry = annotationUndoStack.at(-1);
+    if (!entry) return;
+    setAnnotations((current) => {
+      if (entry.op === "pop") {
+        return current.slice(0, Math.max(0, current.length - entry.count));
+      }
+      if (entry.op === "insert") {
+        const next = [...current];
+        next.splice(entry.idx, 0, entry.annotation);
+        return next;
+      }
+      const next = [...current];
+      if (entry.idx >= 0 && entry.idx < next.length) {
+        next[entry.idx] = entry.previous;
+      }
+      return next;
+    });
+    setAnnotationUndoStack((current) => current.slice(0, -1));
   }
 
   function errorMessage(error: unknown): string {
@@ -299,10 +332,18 @@ export default function Home() {
         </div>
         <AnnotationControls
           activeTool={activeTool}
+          annotationsCount={annotations.length}
+          canUndo={annotationUndoStack.length > 0}
+          drawColor={drawColor}
           isPaused={isPaused}
+          strokeWidth={strokeWidth}
           textAnnotation={textAnnotation}
+          onClear={clearAnnotations}
+          onColorChange={setDrawColor}
+          onStrokeWidthChange={setStrokeWidth}
           onToolChange={setActiveTool}
           onTextAnnotationChange={setTextAnnotation}
+          onUndo={undoAnnotation}
         />
         <div style={{ position: "relative", marginTop: 12 }}>
           {videoUrl ? (
@@ -317,6 +358,9 @@ export default function Home() {
               }}
               onLoadedMetadata={() => {
                 setVideoMetadataLoaded(true);
+                if (videoRef.current?.videoWidth && videoRef.current.videoHeight) {
+                  setVideoAspectRatio(videoRef.current.videoWidth / videoRef.current.videoHeight);
+                }
                 setIngestError("");
                 if (pendingVideoReadyStatus) {
                   setIngestStatus(pendingVideoReadyStatus);
@@ -335,6 +379,7 @@ export default function Home() {
                 const nextTs = videoRef.current?.currentTime ?? 0;
                 setTimestamp(nextTs);
                 setAnnotations([]);
+                setAnnotationUndoStack([]);
                 setIsPaused(true);
                 if (videoId) {
                   const transcript = await getTranscriptWindow(videoId, nextTs);
@@ -343,6 +388,7 @@ export default function Home() {
               }}
               onPlay={() => {
                 setAnnotations([]);
+                setAnnotationUndoStack([]);
                 setIsPaused(false);
               }}
               onTimeUpdate={() => {
@@ -394,9 +440,13 @@ export default function Home() {
             <AnnotationOverlay
               activeTool={activeTool}
               annotations={annotations}
+              drawColor={drawColor}
               isPaused={isPaused}
+              strokeWidth={strokeWidth}
               textAnnotation={textAnnotation}
-              onAddAnnotation={(annotation) => setAnnotations((prev) => [...prev, annotation])}
+              videoAspectRatio={videoAspectRatio}
+              onAnnotationsChange={setAnnotations}
+              onPushUndo={(entry) => setAnnotationUndoStack((prev) => [...prev, entry])}
             />
           )}
         </div>
@@ -409,7 +459,7 @@ export default function Home() {
           Paused annotations: {annotations.length} (
           {isPaused ? `${activeTool} tool active` : "pause video to add"})
         </p>
-        <button type="button" disabled={!annotations.length} onClick={() => setAnnotations([])}>
+        <button type="button" disabled={!annotations.length} onClick={clearAnnotations}>
           Clear annotations
         </button>
         <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
