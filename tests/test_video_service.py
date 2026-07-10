@@ -205,7 +205,13 @@ def test_ingest_media_accepts_youtube_json(tmp_path: Path, monkeypatch) -> None:
         if args[0] == "yt-dlp":
             captured["args"] = args
             captured["kwargs"] = kwargs
-            Path(args[args.index("-o") + 1].replace("%(ext)s", "mp4")).write_bytes(b"fake mp4")
+            output_template = args[args.index("-o") + 1]
+            Path(output_template.replace("%(ext)s", "mp4")).write_bytes(b"fake mp4")
+            info_path = Path(output_template.replace("%(ext)s", "info.json"))
+            info_path.write_text(
+                json.dumps({"title": "Example YouTube Video Title"}),
+                encoding="utf-8",
+            )
             return DownloadResult()
         if args[0] == "ffprobe":
             return ProbeResult()
@@ -220,7 +226,11 @@ def test_ingest_media_accepts_youtube_json(tmp_path: Path, monkeypatch) -> None:
     )
 
     assert response.status_code == 200
-    assert response.json() == {"video_id": "video-youtube"}
+    assert response.json() == {
+        "video_id": "video-youtube",
+        "title": "Example YouTube Video Title",
+        "source": "youtube",
+    }
     assert captured["args"][:5] == [
         "yt-dlp",
         "-f",
@@ -232,6 +242,7 @@ def test_ingest_media_accepts_youtube_json(tmp_path: Path, monkeypatch) -> None:
     assert captured["args"][captured["args"].index("--retries") + 1] == "5"
     assert captured["args"][captured["args"].index("--socket-timeout") + 1] == "30"
     assert "--cookies" not in captured["args"]
+    assert "--write-info-json" in captured["args"]
     assert captured["args"][-2:] == [
         str(tmp_path / "video-youtube" / "source.%(ext)s"),
         "https://www.youtube.com/watch?v=abc123",
@@ -239,6 +250,31 @@ def test_ingest_media_accepts_youtube_json(tmp_path: Path, monkeypatch) -> None:
     assert captured["kwargs"]["capture_output"] is True
     assert captured["kwargs"]["text"] is True
     assert captured["kwargs"]["check"] is False
+
+
+def test_ingest_media_returns_upload_title(tmp_path: Path, monkeypatch) -> None:
+    module = _load_video_module()
+    module.BASE_DIR = tmp_path
+    module.BASE_DIR.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(module, "uuid4", lambda: "video-upload")
+    monkeypatch.setattr(module, "_extract_transcript", lambda video_id, source_path: [])
+    monkeypatch.setattr(module, "_extract_frames", lambda video_id, source_path: [])
+
+    client = TestClient(module.app)
+    response = client.post(
+        "/media/ingest",
+        files={"file": ("maintenance_clip.mp4", b"fake mp4", "video/mp4")},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "video_id": "video-upload",
+        "title": "maintenance_clip",
+        "source": "upload",
+    }
+    metadata = client.get("/media/metadata", params={"video_id": "video-upload"})
+    assert metadata.status_code == 200
+    assert metadata.json()["title"] == "maintenance_clip"
 
 
 def test_ingest_media_includes_configured_ytdlp_options(tmp_path: Path, monkeypatch) -> None:
@@ -272,7 +308,12 @@ def test_ingest_media_includes_configured_ytdlp_options(tmp_path: Path, monkeypa
     def fake_run(args, **kwargs):
         if args[0] == "yt-dlp":
             captured["args"] = args
-            Path(args[args.index("-o") + 1].replace("%(ext)s", "mp4")).write_bytes(b"fake mp4")
+            output_template = args[args.index("-o") + 1]
+            Path(output_template.replace("%(ext)s", "mp4")).write_bytes(b"fake mp4")
+            Path(output_template.replace("%(ext)s", "info.json")).write_text(
+                json.dumps({"title": "Cookie Test Video"}),
+                encoding="utf-8",
+            )
             return DownloadResult()
         if args[0] == "ffprobe":
             return ProbeResult()

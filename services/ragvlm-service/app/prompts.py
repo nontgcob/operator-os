@@ -39,6 +39,7 @@ OPERATOROS_VIDEO_CONTEXT = """You are OperatorOS, an industrial multimodal assis
 - Treat user annotations as intent signals in normalized RAGVLM 0-1000 image coordinates.
 - If a second annotated frame image is provided, use it only as visual guidance for the user's marks; the original frame remains the source image.
 - Use transcript excerpts for temporal context and document excerpts for procedural evidence.
+- When a video title is provided, treat it as grounding context for what the clip is about.
 - Explain spatial relationships precisely when annotations are present.
 - If the frame, transcript, or documents do not support an answer, say what is uncertain.
 - Return SketchVLM JSON so OperatorOS can render your visual explanation as an overlay on the video frame.
@@ -60,11 +61,18 @@ def build_prompt(
     docs: str,
     *,
     model_family: str = "custom",
+    video_title: str | None = None,
 ) -> str:
     base_prompt = f"{OPERATOROS_VIDEO_CONTEXT}\n\n{SKETCHVLM_SYSTEM_PROMPT}\n\n{RAG_SYSTEM_PROMPT}"
+    title_section = (
+        f"Video title:\n{video_title.strip()}\n\n"
+        if isinstance(video_title, str) and video_title.strip()
+        else ""
+    )
     return (
         f"{base_prompt}\n\n"
         f"Model family: {model_family}\n\n"
+        f"{title_section}"
         f"Question:\n{question}\n\n"
         f"Normalized annotations:\n{_format_annotations(annotations)}\n\n"
         f"Transcript window:\n{transcript}\n\n"

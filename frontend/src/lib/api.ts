@@ -3,6 +3,7 @@ import type {
   DocumentIngestResponse,
   MediaIngestResponse,
   TranscriptWindowResponse,
+  VideoMetadataResponse,
 } from "@/lib/types";
 
 const BASE_URL =
@@ -39,6 +40,14 @@ function mediaIngestNetworkError(error: unknown): Error {
 
 export function getMediaSourceUrl(videoId: string): string {
   return `${BASE_URL}/media/source?video_id=${encodeURIComponent(videoId)}`;
+}
+
+export async function getVideoMetadata(videoId: string): Promise<VideoMetadataResponse> {
+  const response = await fetch(`${BASE_URL}/media/metadata?video_id=${encodeURIComponent(videoId)}`);
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+  return response.json();
 }
 
 export async function uploadMedia(file: File): Promise<MediaIngestResponse> {
@@ -111,6 +120,7 @@ export async function uploadDocument(file: File): Promise<DocumentIngestResponse
 export async function askQuestion(input: {
   session_id: string;
   video_id: string;
+  video_title?: string;
   timestamp: number;
   frame_data_url: string;
   annotated_frame_data_url?: string;

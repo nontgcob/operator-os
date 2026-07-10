@@ -42,6 +42,7 @@ class TranscriptSegment(BaseModel):
 
 class InferRequest(BaseModel):
     question: str
+    video_title: str | None = None
     frame_data_url: str
     annotated_frame_data_url: str | None = None
     annotations: list[dict[str, Any]] = Field(default_factory=list)
@@ -76,6 +77,7 @@ def _build_prompt(payload: InferRequest) -> str:
         transcript,
         docs,
         model_family=model_family_for(payload.model),
+        video_title=payload.video_title,
     )
 
 

@@ -41,10 +41,12 @@ def test_prompt_includes_ragvlm_grounding_sections() -> None:
         "[1.00-2.00] Operator points at the lower valve.",
         "Manual: close the lower valve before calibration.",
         model_family="gemini",
+        video_title="Pump Room Safety Walkthrough",
     )
 
     assert "RAGVLM 0-1000 image coordinates" in prompt
     assert "Model family: gemini" in prompt
+    assert "Video title:\nPump Room Safety Walkthrough" in prompt
     assert "Normalized annotations:" in prompt
     assert "## Retrieved context" in prompt
     assert "lower valve before calibration" in prompt

@@ -9,6 +9,7 @@ import {
   askQuestion,
   getMediaSourceUrl,
   getTranscriptWindow,
+  getVideoMetadata,
   ingestYoutubeUrl,
   startTracking,
   uploadDocument,
@@ -188,6 +189,7 @@ export default function Home() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [videoUrl, setVideoUrl] = useState<string>("");
   const [videoId, setVideoId] = useState<string>("");
+  const [videoTitle, setVideoTitle] = useState<string>("");
   const [sessionId] = useState(() => crypto.randomUUID());
   const [question, setQuestion] = useState("");
   const [selectedModel, setSelectedModel] = useState(DEFAULT_RAGVLM_MODEL);
@@ -231,6 +233,7 @@ export default function Home() {
   function resetVideoContext() {
     setVideoUrl("");
     setVideoId("");
+    setVideoTitle("");
     setVideoMetadataLoaded(false);
     setVideoAspectRatio(1);
     setPendingVideoReadyStatus("");
@@ -474,6 +477,19 @@ export default function Home() {
     }
   }
 
+  async function syncVideoTitle(nextVideoId: string, title?: string) {
+    if (title?.trim()) {
+      setVideoTitle(title.trim());
+      return;
+    }
+    try {
+      const metadata = await getVideoMetadata(nextVideoId);
+      setVideoTitle(metadata.title?.trim() || "Untitled video");
+    } catch {
+      setVideoTitle("Untitled video");
+    }
+  }
+
   async function handleUpload(file: File) {
     resetVideoContext();
     setIngesting(true);
@@ -484,6 +500,7 @@ export default function Home() {
     try {
       const result = await uploadMedia(file);
       setVideoId(result.video_id);
+      await syncVideoTitle(result.video_id, result.title);
       setPendingVideoReadyStatus("Local video ready.");
       if ((videoRef.current?.readyState ?? 0) >= HTMLMediaElement.HAVE_METADATA) {
         setVideoMetadataLoaded(true);
@@ -519,6 +536,7 @@ export default function Home() {
     try {
       const result = await ingestYoutubeUrl(trimmedUrl);
       setVideoId(result.video_id);
+      await syncVideoTitle(result.video_id, result.title);
       setPendingVideoReadyStatus("YouTube video ready.");
       setVideoUrl(getMediaSourceUrl(result.video_id));
       setIngestStatus("YouTube video downloaded. Loading player metadata...");
@@ -573,6 +591,7 @@ export default function Home() {
       const response = await askQuestion({
         session_id: sessionId,
         video_id: videoId,
+        video_title: videoTitle || undefined,
         timestamp,
         frame_data_url: frameData,
         annotated_frame_data_url: annotatedFrameData,
@@ -754,6 +773,12 @@ export default function Home() {
           />
 
           <div className="op-video-shell">
+            {videoTitle ? (
+              <div className="op-video-title-bar">
+                <span className="op-video-title-label">Now playing</span>
+                <h2 className="op-video-title">{videoTitle}</h2>
+              </div>
+            ) : null}
             {videoUrl ? (
               <video
                 ref={videoRef}

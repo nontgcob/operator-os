@@ -63,6 +63,59 @@ def _frame_index_path(video_id: str) -> Path:
     return _video_dir(video_id) / "frame_index.json"
 
 
+def _metadata_path(video_id: str) -> Path:
+    return _video_dir(video_id) / "metadata.json"
+
+
+def _title_from_upload_filename(filename: str | None) -> str:
+    if not filename:
+        return "Uploaded video"
+    stem = Path(filename).stem.strip()
+    return stem or "Uploaded video"
+
+
+def _title_from_ytdlp_info(source_path: Path) -> str | None:
+    info_path = source_path.with_suffix(".info.json")
+    if not info_path.exists():
+        return None
+    try:
+        payload = json.loads(info_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    title = payload.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    return None
+
+
+def _write_video_metadata(
+    video_id: str,
+    *,
+    title: str,
+    source: str,
+    source_label: str | None = None,
+) -> dict[str, str]:
+    metadata = {
+        "video_id": video_id,
+        "title": title.strip() or "Untitled video",
+        "source": source,
+    }
+    if source_label:
+        metadata["source_label"] = source_label
+    _metadata_path(video_id).write_text(json.dumps(metadata), encoding="utf-8")
+    return metadata
+
+
+def _read_video_metadata(video_id: str) -> dict[str, str] | None:
+    path = _metadata_path(video_id)
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
 def _load_whisper_model() -> Any:
     global _WHISPER_MODEL
     if _WHISPER_MODEL is None:
@@ -333,6 +386,7 @@ def _build_ytdlp_command(youtube_url: str, output_path: Path) -> list[str]:
     for extractor_args in _configured_extractor_args():
         command.extend(["--extractor-args", extractor_args])
 
+    command.append("--write-info-json")
     command.extend(["-o", str(_ytdlp_output_template(output_path)), youtube_url])
     return command
 
@@ -615,8 +669,14 @@ async def ingest_media(
 ):
     video_id = str(uuid4())
     youtube_url = await _youtube_url_from_request(request, youtube_url)
+    title = "Untitled video"
+    source = "unknown"
+    source_label: str | None = None
     if file:
         source_path = _save_upload(video_id, file)
+        title = _title_from_upload_filename(file.filename)
+        source = "upload"
+        source_label = file.filename
     elif youtube_url:
         source_path = _source_path(video_id)
         result = subprocess.run(
@@ -632,12 +692,35 @@ async def ingest_media(
             )
         _normalize_downloaded_source(source_path)
         _ensure_playable_mp4(source_path)
+        title = _title_from_ytdlp_info(source_path) or "YouTube video"
+        source = "youtube"
+        source_label = youtube_url
     else:
         raise HTTPException(status_code=400, detail="No input media provided")
 
     _extract_transcript(video_id, source_path)
     _extract_frames(video_id, source_path)
-    return {"video_id": video_id}
+    metadata = _write_video_metadata(
+        video_id,
+        title=title,
+        source=source,
+        source_label=source_label,
+    )
+    return {"video_id": video_id, "title": metadata["title"], "source": metadata["source"]}
+
+
+@app.get("/media/metadata")
+async def media_metadata(video_id: str) -> dict[str, str]:
+    metadata = _read_video_metadata(video_id)
+    if metadata:
+        return metadata
+    if not _source_path(video_id).exists():
+        raise HTTPException(status_code=404, detail="Video metadata not found")
+    return {
+        "video_id": video_id,
+        "title": "Untitled video",
+        "source": "unknown",
+    }
 
 
 def _parse_range_header(range_header: str | None, file_size: int) -> tuple[int, int] | None:

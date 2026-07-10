@@ -65,6 +65,15 @@ export interface TranscriptWindowResponse {
 
 export interface MediaIngestResponse {
   video_id: string;
+  title?: string;
+  source?: "upload" | "youtube" | "unknown";
+}
+
+export interface VideoMetadataResponse {
+  video_id: string;
+  title: string;
+  source?: string;
+  source_label?: string;
 }
 
 export interface DocumentIngestResponse {

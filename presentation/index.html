@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OperatorOS — Presentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #f4f6f8;
+      --surface: #ffffff;
+      --ink: #0f172a;
+      --ink-muted: #64748b;
+      --ink-soft: #94a3b8;
+      --accent: #2563eb;
+      --accent-soft: #dbeafe;
+      --accent-dark: #1d4ed8;
+      --line: #e2e8f0;
+      --success: #059669;
+      --success-soft: #d1fae5;
+      --warm: #f59e0b;
+      --warm-soft: #fef3c7;
+      --shadow: 0 4px 24px rgba(15, 23, 42, 0.06);
+      --shadow-lg: 0 20px 60px rgba(15, 23, 42, 0.10);
+      --radius: 16px;
+      --slide-w: min(96vw, 1280px);
+      --slide-h: min(calc(var(--slide-w) * 9 / 16), 86vh);
+    }
+
+    html, body {
+      height: 100%;
+      font-family: "Poppins", system-ui, sans-serif;
+      background: #0b1220;
+      color: var(--ink);
+      overflow: hidden;
+    }
+
+    .deck {
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+
+    .slide-viewport {
+      width: var(--slide-w);
+      height: var(--slide-h);
+      position: relative;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: var(--shadow-lg);
+    }
+
+    .slide {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.35s ease;
+    }
+
+    .slide.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    /* ── Slide 1: Hero image ── */
+    .slide-hero {
+      background: #000;
+    }
+
+    .slide-hero img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    /* ── Shared slide layout ── */
+    .slide-content {
+      background: var(--bg);
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      padding: clamp(2rem, 4vw, 3.5rem) clamp(2rem, 5vw, 4.5rem);
+      overflow: hidden;
+    }
+
+    .eyebrow {
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 0.75rem;
+    }
+
+    h1 {
+      font-size: clamp(2rem, 4.2vw, 3.25rem);
+      font-weight: 700;
+      line-height: 1.2;
+      color: var(--ink);
+      letter-spacing: -0.02em;
+    }
+
+    h1 em {
+      font-style: normal;
+      font-weight: 600;
+      color: var(--accent-dark);
+    }
+
+    .lead {
+      font-size: clamp(1rem, 1.6vw, 1.2rem);
+      line-height: 1.65;
+      color: var(--ink-muted);
+      max-width: 52ch;
+      margin-top: 1rem;
+    }
+
+    /* ── Slide 2: Intro ── */
+    .intro-grid {
+      display: grid;
+      grid-template-columns: 1.05fr 0.95fr;
+      gap: clamp(1.5rem, 3vw, 2.5rem);
+      flex: 1;
+      align-items: center;
+      margin-top: 1.5rem;
+      min-height: 0;
+    }
+
+    .intro-left .lead {
+      margin-top: 0.5rem;
+    }
+
+    .intro-left p + p {
+      margin-top: 1rem;
+      font-size: 0.95rem;
+      line-height: 1.65;
+      color: var(--ink-muted);
+      max-width: 48ch;
+    }
+
+    .highlight-box {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 1.5rem 1.75rem;
+      box-shadow: var(--shadow);
+      margin-top: 1.5rem;
+    }
+
+    .highlight-box p {
+      font-size: 0.92rem;
+      line-height: 1.6;
+      color: var(--ink);
+    }
+
+    .highlight-box strong {
+      color: var(--accent-dark);
+    }
+
+    .gap-visual {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 2rem 1.75rem;
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .gap-step {
+      display: flex;
+      align-items: flex-start;
+      gap: 1rem;
+      position: relative;
+    }
+
+    .gap-step + .gap-step {
+      margin-top: 0;
+    }
+
+    .gap-step:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      left: 17px;
+      top: 36px;
+      width: 2px;
+      height: calc(100% + 8px);
+      background: linear-gradient(to bottom, var(--line), var(--accent-soft));
+    }
+
+    .gap-dot {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      display: grid;
+      place-items: center;
+      font-size: 0.75rem;
+      font-weight: 700;
+      z-index: 1;
+    }
+
+    .gap-dot.dim { background: #f1f5f9; color: var(--ink-soft); border: 1px solid var(--line); }
+    .gap-dot.mid { background: var(--accent-soft); color: var(--accent-dark); border: 1px solid #bfdbfe; }
+    .gap-dot.bright { background: var(--success-soft); color: var(--success); border: 1px solid #a7f3d0; }
+
+    .gap-text h3 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--ink);
+      margin-bottom: 0.2rem;
+    }
+
+    .gap-text p {
+      font-size: 0.82rem;
+      line-height: 1.5;
+      color: var(--ink-muted);
+    }
+
+    .gap-step + .gap-step { padding-top: 1.25rem; }
+
+    .gap-bridge {
+      margin: 0.5rem 0 0.5rem 3rem;
+      padding: 0.65rem 1rem;
+      background: linear-gradient(90deg, var(--accent-soft), #eff6ff);
+      border-left: 3px solid var(--accent);
+      border-radius: 0 8px 8px 0;
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--accent-dark);
+      letter-spacing: 0.01em;
+    }
+
+    /* ── Slide 3: Architecture (Mermaid) ── */
+    .slide-arch {
+      padding: clamp(1.25rem, 2.5vw, 2rem) clamp(1.5rem, 3.5vw, 2.5rem);
+    }
+
+    .arch-header {
+      flex-shrink: 0;
+      margin-bottom: 0.5rem;
+    }
+
+    .slide-arch h1 {
+      font-size: clamp(1.35rem, 2.4vw, 1.85rem);
+    }
+
+    .arch-header .lead {
+      margin-top: 0.25rem;
+      max-width: none;
+      font-size: 0.82rem;
+      line-height: 1.45;
+    }
+
+    .arch-mermaid-wrap {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 0.5rem 0.75rem;
+      box-shadow: var(--shadow);
+    }
+
+    .arch-mermaid-wrap .mermaid {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .arch-mermaid-wrap svg {
+      max-width: 100%;
+      max-height: 100%;
+    }
+
+    /* ── Slide 4: Testing ── */
+    .testing-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: clamp(1.25rem, 2.5vw, 2rem);
+      flex: 1;
+      align-items: stretch;
+      margin-top: 1.25rem;
+      min-height: 0;
+    }
+
+    .testing-main {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .status-card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      box-shadow: var(--shadow);
+      flex: 1;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      background: var(--warm-soft);
+      color: #b45309;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 0.35rem 0.75rem;
+      border-radius: 999px;
+      margin-bottom: 1rem;
+    }
+
+    .status-badge::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--warm);
+    }
+
+    .status-card h2 {
+      font-size: clamp(1.4rem, 2.5vw, 1.85rem);
+      font-weight: 600;
+      line-height: 1.3;
+      margin-bottom: 0.75rem;
+    }
+
+    .status-card p {
+      font-size: 0.92rem;
+      line-height: 1.65;
+      color: var(--ink-muted);
+    }
+
+    .checklist {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .check-item {
+      display: flex;
+      align-items: center;
+      gap: 0.85rem;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 1rem 1.15rem;
+      box-shadow: var(--shadow);
+    }
+
+    .check-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: var(--accent-soft);
+      color: var(--accent-dark);
+      display: grid;
+      place-items: center;
+      flex-shrink: 0;
+      font-size: 0.85rem;
+    }
+
+    .check-item h4 {
+      font-size: 0.92rem;
+      font-weight: 600;
+      color: var(--ink);
+    }
+
+    .goal-banner {
+      margin-top: auto;
+      padding: 1rem 1.25rem;
+      background: linear-gradient(135deg, #ecfdf5, #d1fae5);
+      border: 1px solid #a7f3d0;
+      border-radius: 12px;
+      font-size: 0.88rem;
+      line-height: 1.55;
+      color: #065f46;
+    }
+
+    .goal-banner strong {
+      display: block;
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 0.25rem;
+      color: var(--success);
+    }
+
+    /* ── Navigation ── */
+    .nav {
+      position: fixed;
+      bottom: 1.75rem;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+      z-index: 100;
+    }
+
+    .nav-btn {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: 1px solid rgba(255,255,255,0.15);
+      background: rgba(255,255,255,0.08);
+      backdrop-filter: blur(8px);
+      color: #fff;
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      transition: background 0.2s, border-color 0.2s;
+    }
+
+    .nav-btn:hover:not(:disabled) {
+      background: rgba(255,255,255,0.16);
+      border-color: rgba(255,255,255,0.3);
+    }
+
+    .nav-btn:disabled {
+      opacity: 0.3;
+      cursor: default;
+    }
+
+    .nav-dots {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    .nav-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.25);
+      border: none;
+      cursor: pointer;
+      padding: 0;
+      transition: background 0.2s, transform 0.2s;
+    }
+
+    .nav-dot.active {
+      background: #fff;
+      transform: scale(1.25);
+    }
+
+    .slide-counter {
+      position: fixed;
+      top: 1.25rem;
+      right: 1.5rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: rgba(255,255,255,0.45);
+      letter-spacing: 0.06em;
+      z-index: 100;
+    }
+
+    @media (max-width: 900px) {
+      .intro-grid,
+      .testing-grid {
+        grid-template-columns: 1fr;
+        overflow-y: auto;
+      }
+
+      .slide-content {
+        overflow-y: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="deck">
+    <div class="slide-counter"><span id="current">1</span> / 4</div>
+
+    <div class="slide-viewport">
+      <!-- Slide 1 -->
+      <section class="slide slide-hero active" data-slide="0">
+        <img src="Machine Introduction.png" alt="Industrial lathe machine in a manufacturing workshop" />
+      </section>
+
+      <!-- Slide 2 -->
+      <section class="slide" data-slide="1">
+        <div class="slide-content">
+          <div class="eyebrow">Introducing OperatorOS</div>
+          <h1>Your heads-up before<br />the <em>first time</em> at the machine</h1>
+
+          <div class="intro-grid">
+            <div class="intro-left">
+              <p class="lead">
+                First time at a manufacturing machine? Even a basic tutorial can feel overwhelming.
+              </p>
+              <div class="highlight-box">
+                <p>
+                  OperatorOS helps beginners understand what they're looking at — <strong>before</strong> they touch the controls.
+                  We're not replacing trained instructors. We bridge the gap until your first hands-on session.
+                </p>
+              </div>
+            </div>
+
+            <div class="gap-visual">
+              <div class="gap-step">
+                <div class="gap-dot dim">1</div>
+                <div class="gap-text">
+                  <h3>Know nothing about the machine</h3>
+                </div>
+              </div>
+              <div class="gap-bridge">OperatorOS lives here</div>
+              <div class="gap-step">
+                <div class="gap-dot mid">2</div>
+                <div class="gap-text">
+                  <h3>Watch, pause, and ask questions</h3>
+                </div>
+              </div>
+              <div class="gap-step">
+                <div class="gap-dot bright">3</div>
+                <div class="gap-text">
+                  <h3>Practice with a trained instructor</h3>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Slide 3 -->
+      <section class="slide" data-slide="2">
+        <div class="slide-content slide-arch">
+          <div class="arch-header">
+            <div class="eyebrow">Under the hood</div>
+            <h1>How OperatorOS works</h1>
+          </div>
+
+          <div class="arch-mermaid-wrap">
+            <pre class="mermaid arch-mermaid">
+flowchart TB
+    subgraph User["Browser"]
+        UI[Video, drawings, chat]
+    end
+
+    subgraph Hub["Coordinator"]
+        ORCH[Connects everything]
+    end
+
+    subgraph Video["Video prep"]
+        VS[Videos, transcripts, frames]
+    end
+
+    subgraph AI["AI and docs"]
+        DOCS[Manual search]
+        BRAIN[AI answers]
+    end
+
+    subgraph Tracking["Tracking"]
+        TRACK[Follows highlights]
+    end
+
+    subgraph Storage["Storage"]
+        DISK[(Videos and transcripts)]
+        MANUALS[(Manuals)]
+    end
+
+    subgraph External["External"]
+        YT[YouTube]
+        CLOUD[Cloud AI]
+    end
+
+    UI --> ORCH
+    ORCH --> VS
+    ORCH --> DOCS
+    ORCH --> BRAIN
+    ORCH --> TRACK
+    VS --> DISK
+    VS --> YT
+    DOCS --> MANUALS
+    BRAIN --> CLOUD
+    TRACK --> DISK
+            </pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Slide 4 -->
+      <section class="slide" data-slide="3">
+        <div class="slide-content">
+          <div class="eyebrow">Where we are today</div>
+          <h1>Testing with real<br /><em>machine tutorials</em></h1>
+
+          <div class="testing-grid">
+            <div class="testing-main">
+              <div class="status-card">
+                <div class="status-badge">Active development</div>
+                <h2>Testing with real machine tutorials</h2>
+                <p>
+                  We're running OperatorOS on actual walkthrough videos to find what breaks — and fix it before beginners rely on it.
+                </p>
+              </div>
+              <div class="goal-banner">
+                <strong>Goal</strong>
+                Make it work for real tutorials, not just demos.
+              </div>
+            </div>
+
+            <div class="checklist">
+              <div class="check-item">
+                <div class="check-icon">▶</div>
+                <div>
+                  <h4>Real tutorial videos</h4>
+                </div>
+              </div>
+              <div class="check-item">
+                <div class="check-icon">?</div>
+                <div>
+                  <h4>Find the flaws</h4>
+                </div>
+              </div>
+              <div class="check-item">
+                <div class="check-icon">↻</div>
+                <div>
+                  <h4>Fix what matters</h4>
+                </div>
+              </div>
+              <div class="check-item">
+                <div class="check-icon">✓</div>
+                <div>
+                  <h4>Ship something useful</h4>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <nav class="nav" aria-label="Slide navigation">
+      <button class="nav-btn" id="prev" aria-label="Previous slide" disabled>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <div class="nav-dots" id="dots"></div>
+      <button class="nav-btn" id="next" aria-label="Next slide">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+      </button>
+    </nav>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: "base",
+      themeVariables: {
+        fontFamily: "Poppins, system-ui, sans-serif",
+        fontSize: "13px",
+        primaryColor: "#dbeafe",
+        primaryTextColor: "#0f172a",
+        primaryBorderColor: "#2563eb",
+        secondaryColor: "#f8fafc",
+        secondaryTextColor: "#0f172a",
+        secondaryBorderColor: "#e2e8f0",
+        tertiaryColor: "#ffffff",
+        tertiaryTextColor: "#0f172a",
+        tertiaryBorderColor: "#e2e8f0",
+        lineColor: "#94a3b8",
+        textColor: "#0f172a",
+        mainBkg: "#ffffff",
+        nodeBorder: "#2563eb",
+        clusterBkg: "#f8fafc",
+        clusterBorder: "#e2e8f0",
+        titleColor: "#1d4ed8",
+      },
+      flowchart: {
+        htmlLabels: true,
+        curve: "basis",
+        padding: 10,
+        nodeSpacing: 35,
+        rankSpacing: 40,
+        useMaxWidth: true,
+      },
+    });
+
+    let archDiagramRendered = false;
+
+    async function renderArchDiagram() {
+      if (archDiagramRendered) return;
+      const el = document.querySelector(".arch-mermaid");
+      if (!el) return;
+      try {
+        await mermaid.run({ nodes: [el] });
+        archDiagramRendered = true;
+      } catch (err) {
+        console.error("Mermaid render failed:", err);
+      }
+    }
+
+    const slides = document.querySelectorAll(".slide");
+    const total = slides.length;
+    let current = 0;
+
+    const prevBtn = document.getElementById("prev");
+    const nextBtn = document.getElementById("next");
+    const counter = document.getElementById("current");
+    const dotsContainer = document.getElementById("dots");
+
+    slides.forEach((_, i) => {
+      const dot = document.createElement("button");
+      dot.className = "nav-dot" + (i === 0 ? " active" : "");
+      dot.setAttribute("aria-label", `Go to slide ${i + 1}`);
+      dot.addEventListener("click", () => goTo(i));
+      dotsContainer.appendChild(dot);
+    });
+
+    const dots = dotsContainer.querySelectorAll(".nav-dot");
+
+    function goTo(index) {
+      if (index < 0 || index >= total) return;
+      slides[current].classList.remove("active");
+      dots[current].classList.remove("active");
+      current = index;
+      slides[current].classList.add("active");
+      dots[current].classList.add("active");
+      counter.textContent = current + 1;
+      prevBtn.disabled = current === 0;
+      nextBtn.disabled = current === total - 1;
+      if (current === 2) renderArchDiagram();
+    }
+
+    prevBtn.addEventListener("click", () => goTo(current - 1));
+    nextBtn.addEventListener("click", () => goTo(current + 1));
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowRight" || e.key === "ArrowDown" || e.key === " ") {
+        e.preventDefault();
+        goTo(current + 1);
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+        e.preventDefault();
+        goTo(current - 1);
+      }
+    });
+  </script>
+</body>
+</html>

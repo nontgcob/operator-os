@@ -78,6 +78,7 @@ class TranscriptWindow(BaseModel):
 class ChatStreamRequest(BaseModel):
     session_id: str
     video_id: str
+    video_title: str | None = None
     timestamp: float
     frame_data_url: str
     annotated_frame_data_url: str | None = None
@@ -258,6 +259,18 @@ async def transcript_window(video_id: str, timestamp: float, before: float = 30,
     return response.json()
 
 
+@app.get("/media/metadata")
+async def media_metadata(video_id: str) -> Any:
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(
+            f"{VIDEO_SERVICE_URL}/media/metadata",
+            params={"video_id": video_id},
+        )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    return response.json()
+
+
 @app.post("/documents/ingest")
 async def document_ingest(
     file: UploadFile = File(...),
@@ -301,6 +314,7 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
         )
     request_body = {
         "question": payload.question,
+        "video_title": payload.video_title,
         "frame_data_url": payload.frame_data_url,
         "annotated_frame_data_url": payload.annotated_frame_data_url,
         "annotations": payload.annotations,
