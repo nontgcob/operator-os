@@ -20,3 +20,5 @@ data/ytdlp/
 uploads/
 artifacts/
 *.log
+models/*
+!models/README.md

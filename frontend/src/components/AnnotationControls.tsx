@@ -3,7 +3,7 @@
 import type { ComponentType } from "react";
 import type { AnnotationType } from "@/lib/types";
 
-const PALETTE = ["#ff6b6b", "#6b9fff", "#6bffb0", "#F2D055", "#AC78A1"];
+const PALETTE = ["#ef4444", "#86efac", "#fde047", "#c4b5fd", "#ffffff"];
 
 const iconStyle = { height: 16, width: 16 } as const;
 
@@ -118,116 +118,81 @@ export function AnnotationControls({
   onUndo,
 }: AnnotationControlsProps) {
   return (
-    <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-        <strong>Annotation tool</strong>
+    <div className="op-card" style={{ marginTop: 14 }}>
+      <div className="op-annotation-header">
+        <h2 className="op-card-title" style={{ margin: 0 }}>
+          Annotation Tools
+        </h2>
+        <div className="op-status-pill">
+          <span className="op-status-dot" aria-hidden="true" />
+          All system operational
+        </div>
+      </div>
+
+      <div className="op-tool-row">
         {ANNOTATION_TOOLS.map(({ Icon, ...tool }) => (
           <button
             key={tool.type}
             type="button"
+            className="op-tool-button"
             aria-label={tool.label}
             aria-pressed={activeTool === tool.type}
             title={tool.label}
             onClick={() => onToolChange(tool.type)}
-            style={{
-              border: `1px solid ${activeTool === tool.type ? "#1d4ed8" : "#30363d"}`,
-              background: activeTool === tool.type ? "#2563eb" : "#0d1117",
-              color: "#f0f6fc",
-              borderRadius: 6,
-              cursor: "pointer",
-              display: "grid",
-              height: 32,
-              placeItems: "center",
-              width: 32,
-            }}
           >
             <Icon />
           </button>
         ))}
-        <button
-          type="button"
-          disabled={!canUndo}
-          onClick={onUndo}
-          style={{
-            background: "#0d1117",
-            border: "1px solid #30363d",
-            borderRadius: 6,
-            color: "#f0f6fc",
-            cursor: canUndo ? "pointer" : "not-allowed",
-            opacity: canUndo ? 1 : 0.45,
-            padding: "6px 10px",
-          }}
-        >
+        <button type="button" className="op-secondary-button" disabled={!canUndo} onClick={onUndo}>
           Undo
         </button>
-        <button
-          type="button"
-          disabled={!annotationsCount}
-          onClick={onClear}
-          style={{
-            background: "rgba(248, 81, 73, 0.18)",
-            border: "1px solid #7f1d1d",
-            borderRadius: 6,
-            color: "#ffb4ad",
-            cursor: annotationsCount ? "pointer" : "not-allowed",
-            opacity: annotationsCount ? 1 : 0.45,
-            padding: "6px 10px",
-          }}
-        >
+        <button type="button" className="op-danger-text" disabled={!annotationsCount} onClick={onClear}>
           Clear
         </button>
       </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
-        <span style={{ color: "#8b949e", fontSize: 12 }}>Color</span>
+
+      <div className="op-color-row">
+        <span className="op-color-label">Color</span>
         {PALETTE.map((color) => (
           <button
             key={color}
             type="button"
+            className="op-color-swatch"
             aria-label={`Use ${color}`}
+            data-active={drawColor === color}
             onClick={() => onColorChange(color)}
-            style={{
-              background: color,
-              border: drawColor === color ? "2px solid #f0f6fc" : "2px solid transparent",
-              borderRadius: 999,
-              cursor: "pointer",
-              height: 22,
-              outline: "1px solid #30363d",
-              width: 22,
-            }}
+            style={{ background: color }}
           />
         ))}
-        <label style={{ display: "flex", gap: 6, alignItems: "center", color: "#8b949e", fontSize: 12 }}>
-          Width
+        <label className="op-width-control">
+          <span className="op-width-label">Width</span>
           <input
             type="range"
             min={1}
             max={8}
             value={strokeWidth}
             onChange={(event) => onStrokeWidthChange(Number(event.target.value))}
-            style={{ accentColor: drawColor }}
+            style={{ accentColor: drawColor === "#ffffff" ? "#6366f1" : drawColor }}
           />
-          <span>{strokeWidth}</span>
+          <span className="op-width-value">{strokeWidth}</span>
         </label>
       </div>
+
       {activeTool === "text" && (
         <input
+          className="op-text-tool-input"
           value={textAnnotation}
           onChange={(event) => onTextAnnotationChange(event.target.value)}
           placeholder="Text label to place on the frame"
-          style={{
-            background: "#0d1117",
-            border: "1px solid #30363d",
-            borderRadius: 6,
-            color: "#f0f6fc",
-            padding: 8,
-          }}
         />
       )}
-      <small style={{ color: "#8b949e" }}>
+
+      <p className="op-annotation-hint">
         {isPaused
-          ? ANNOTATION_TOOLS.find((tool) => tool.type === activeTool)?.hint
+          ? ANNOTATION_TOOLS.find((tool) => tool.type === activeTool)?.hint ??
+            "Select a tool from the bar above to start annotating the canvas."
           : "Pause playback to annotate the current frame."}
-      </small>
+      </p>
     </div>
   );
 }

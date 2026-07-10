@@ -216,9 +216,11 @@ export default function Home() {
   const [isPaused, setIsPaused] = useState(false);
   const [activeTool, setActiveTool] = useState<AnnotationType>("cursor");
   const [annotationUndoStack, setAnnotationUndoStack] = useState<AnnotationUndoEntry[]>([]);
-  const [drawColor, setDrawColor] = useState("#ff6b6b");
+  const [drawColor, setDrawColor] = useState("#ef4444");
   const [strokeWidth, setStrokeWidth] = useState(3);
   const [textAnnotation, setTextAnnotation] = useState("");
+  const [showTranscript, setShowTranscript] = useState(false);
+  const localFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const currentOverlay = useMemo(() => {
     return trackingOverlays.filter(
@@ -642,235 +644,297 @@ export default function Home() {
     }
   }
 
+  const selectedModelLabel =
+    RAGVLM_MODELS.find((model) => model.value === selectedModel)?.label ?? selectedModel;
+
   return (
-    <main style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16, padding: 16 }}>
-      <section style={{ background: "#161b22", borderRadius: 8, padding: 12 }}>
-        <h2>OperatorOS Video Player</h2>
-        <div style={{ display: "grid", gap: 12 }}>
-          <div style={{ display: "grid", gap: 12, gridTemplateColumns: "minmax(180px, 1fr) 2fr" }}>
-            <label style={{ display: "grid", gap: 6 }}>
-              Upload local MP4
-              <input
-                type="file"
-                accept="video/mp4"
-                disabled={ingesting}
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) void handleUpload(file);
-                }}
-              />
-            </label>
-            <form onSubmit={handleYoutubeIngest} style={{ display: "grid", gap: 6 }}>
-              <label htmlFor="youtube-url">YouTube URL</label>
-              <div style={{ display: "flex", gap: 8 }}>
+    <div className="op-shell">
+      <header className="op-header">
+        <h1 className="op-logo">OperatorOS</h1>
+        <div className="op-header-actions">
+          <a className="op-header-link" href="http://localhost:8000/docs" target="_blank" rel="noreferrer">
+            Docs
+          </a>
+          <a
+            className="op-header-link"
+            href="https://github.com/nontgcob/operator-os"
+            target="_blank"
+            rel="noreferrer"
+          >
+            GitHub
+          </a>
+        </div>
+      </header>
+
+      <div className="op-layout">
+        <section>
+          <div className="op-card">
+            <div className="op-upload-row">
+              <div>
+                <span className="op-field-label">Local Source</span>
+                <input
+                  ref={localFileInputRef}
+                  type="file"
+                  accept="video/mp4"
+                  hidden
+                  disabled={ingesting}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.currentTarget.value = "";
+                    if (file) void handleUpload(file);
+                  }}
+                />
+                <button
+                  type="button"
+                  className="op-file-button"
+                  disabled={ingesting}
+                  onClick={() => localFileInputRef.current?.click()}
+                >
+                  Upload local MP4 file
+                </button>
+              </div>
+              <div>
+                <span className="op-field-label">Local Source</span>
                 <input
                   id="youtube-url"
                   type="url"
+                  className="op-text-input"
                   value={youtubeUrl}
                   disabled={ingesting}
-                  placeholder="https://www.youtube.com/watch?v=..."
-                  onChange={(e) => setYoutubeUrl(e.target.value)}
-                  style={{ flex: 1 }}
+                  placeholder="Paste a Youtube URL..."
+                  onChange={(event) => setYoutubeUrl(event.target.value)}
                 />
-                <button type="submit" disabled={ingesting || !youtubeUrl.trim()}>
-                  {ingesting ? "Ingesting..." : "Ingest URL"}
-                </button>
               </div>
-            </form>
+              <form onSubmit={handleYoutubeIngest}>
+                <span className="op-field-label" style={{ visibility: "hidden" }}>
+                  Upload
+                </span>
+                <button
+                  type="submit"
+                  className="op-primary-button"
+                  disabled={ingesting || !youtubeUrl.trim()}
+                >
+                  {ingesting ? "Uploading..." : "Upload Video"}
+                </button>
+              </form>
+            </div>
+            {ingestStatus && (
+              <p role="status" className="op-status-text">
+                {ingestStatus}
+              </p>
+            )}
+            {ingestError && (
+              <div role="alert" className="op-error-text">
+                <p style={{ margin: 0 }}>{ingestError}</p>
+                {shouldShowYoutubeCookieHelp(ingestError) && (
+                  <p style={{ margin: "6px 0 0" }}>
+                    For Docker, export YouTube browser cookies to <code>./data/ytdlp/cookies.txt</code>,
+                    set <code>YTDLP_COOKIES_FILE=/app/data/ytdlp/cookies.txt</code>, then rebuild the
+                    video service.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
-          {ingestStatus && (
-            <p role="status" style={{ margin: 0, color: "#9ecbff" }}>
-              {ingestStatus}
-            </p>
-          )}
-          {ingestError && (
-            <div role="alert" style={{ margin: 0, color: "#ff7b72" }}>
-              <p style={{ margin: 0 }}>{ingestError}</p>
-              {shouldShowYoutubeCookieHelp(ingestError) && (
-                <p style={{ margin: "6px 0 0" }}>
-                  For Docker, export YouTube browser cookies to <code>./data/ytdlp/cookies.txt</code>,
-                  set <code>YTDLP_COOKIES_FILE=/app/data/ytdlp/cookies.txt</code>, then rebuild the
-                  video service.
-                </p>
-              )}
-            </div>
-          )}
-        </div>
-        <AnnotationControls
-          activeTool={activeTool}
-          annotationsCount={annotations.length}
-          canUndo={annotationUndoStack.length > 0}
-          drawColor={drawColor}
-          isPaused={isPaused}
-          strokeWidth={strokeWidth}
-          textAnnotation={textAnnotation}
-          onClear={clearAnnotations}
-          onColorChange={setDrawColor}
-          onStrokeWidthChange={setStrokeWidth}
-          onToolChange={setActiveTool}
-          onTextAnnotationChange={setTextAnnotation}
-          onUndo={undoAnnotation}
-        />
-        <div style={{ position: "relative", marginTop: 12 }}>
-          {videoUrl ? (
-            <video
-              ref={videoRef}
-              controls
-              crossOrigin="anonymous"
-              src={videoUrl}
-              style={{ width: "100%", borderRadius: 8 }}
-              onLoadStart={() => {
-                setVideoMetadataLoaded(false);
-              }}
-              onLoadedMetadata={() => {
-                setVideoMetadataLoaded(true);
-                if (videoRef.current?.videoWidth && videoRef.current.videoHeight) {
-                  setVideoAspectRatio(videoRef.current.videoWidth / videoRef.current.videoHeight);
-                }
-                setIngestError("");
-                if (pendingVideoReadyStatus) {
-                  setIngestStatus(pendingVideoReadyStatus);
-                  setPendingVideoReadyStatus("");
-                }
-              }}
-              onError={() => {
-                setVideoMetadataLoaded(false);
-                setPendingVideoReadyStatus("");
-                setIngestStatus("Video source failed to load in the player.");
-                setIngestError(
-                  `Video player could not load the selected media. ${videoElementErrorMessage(videoRef.current)}`
-                );
-              }}
-              onPause={async () => {
-                const nextTs = videoRef.current?.currentTime ?? 0;
-                setTimestamp(nextTs);
-                setAnnotations([]);
-                setAnnotationUndoStack([]);
-                setIsPaused(true);
-                if (videoId) {
-                  await loadTranscriptWindow(videoId, nextTs);
-                }
-              }}
-              onPlay={() => {
-                setAnnotations([]);
-                setAnnotationUndoStack([]);
-                setIsPaused(false);
-              }}
-              onTimeUpdate={() => {
-                setTimestamp(videoRef.current?.currentTime ?? 0);
-              }}
-            />
-          ) : (
-            <div
-              role="status"
-              style={{
-                display: "grid",
-                minHeight: 260,
-                placeItems: "center",
-                border: "1px dashed #30363d",
-                borderRadius: 8,
-                color: "#8b949e",
-              }}
-            >
-              Upload an MP4 or ingest a YouTube URL to load a video.
-            </div>
-          )}
-          {videoUrl && showTrackingOverlays && (
-            <svg
-              aria-hidden="true"
-              style={{
-                position: "absolute",
-                inset: 0,
-                pointerEvents: "none",
-                width: "100%",
-                height: "100%",
-              }}
-              viewBox="0 0 100 100"
-              preserveAspectRatio="none"
-            >
-              {currentOverlay.map((overlay) => (
-                <polygon
-                  key={`${overlay.track_id}-${overlay.timestamp}`}
-                  points={overlay.points.map((p) => `${p.x},${p.y}`).join(" ")}
-                  fill="none"
-                  stroke={overlay.color}
-                  strokeWidth={0.7}
-                  strokeDasharray="2 1.5"
-                  opacity={0.85}
-                />
-              ))}
-            </svg>
-          )}
-          {videoUrl && (
-            <AnnotationOverlay
-              activeTool={activeTool}
-              annotations={annotations}
-              drawColor={drawColor}
-              isPaused={isPaused}
-              strokeWidth={strokeWidth}
-              textAnnotation={textAnnotation}
-              videoAspectRatio={videoAspectRatio}
-              onAnnotationsChange={setAnnotations}
-              onPushUndo={(entry) => setAnnotationUndoStack((prev) => [...prev, entry])}
-            />
-          )}
-        </div>
-      </section>
 
-      <section style={{ background: "#161b22", borderRadius: 8, padding: 12 }}>
-        <h2>Contextual Chat</h2>
-        <p>Timestamp: {formatTimestamp(timestamp)}</p>
-        <p>
-          Paused annotations: {annotations.length} (
-          {isPaused ? `${activeTool} tool active` : "pause video to add"})
-        </p>
-        <button type="button" disabled={!annotations.length} onClick={clearAnnotations}>
-          Clear annotations
-        </button>
-        <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <input
-            type="checkbox"
-            checked={trackingEnabled}
-            onChange={(e) => setTrackingEnabled(e.target.checked)}
+          <AnnotationControls
+            activeTool={activeTool}
+            annotationsCount={annotations.length}
+            canUndo={annotationUndoStack.length > 0}
+            drawColor={drawColor}
+            isPaused={isPaused}
+            strokeWidth={strokeWidth}
+            textAnnotation={textAnnotation}
+            onClear={clearAnnotations}
+            onColorChange={setDrawColor}
+            onStrokeWidthChange={setStrokeWidth}
+            onToolChange={setActiveTool}
+            onTextAnnotationChange={setTextAnnotation}
+            onUndo={undoAnnotation}
           />
-          Enable SAM3 tracking
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <input
-            type="checkbox"
-            checked={showTrackingOverlays}
-            onChange={(e) => setShowTrackingOverlays(e.target.checked)}
-          />
-          Show tracking overlays
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <input
-            type="checkbox"
-            checked={sendAnnotatedSnapshot}
-            onChange={(e) => setSendAnnotatedSnapshot(e.target.checked)}
-          />
-          Also send annotated snapshot
-        </label>
-        <p style={{ color: "#8b949e", margin: "4px 0 0" }}>
-          Default payload: original frame + annotation JSON. When checked, OperatorOS also sends a second
-          frame image with your annotations drawn on top.
-        </p>
-        <section
-          style={{
-            border: "1px solid #30363d",
-            borderRadius: 8,
-            display: "grid",
-            gap: 8,
-            marginTop: 12,
-            padding: 10,
-          }}
-        >
-          <strong>Documents / Manuals</strong>
-          <label style={{ display: "grid", gap: 6 }}>
-            Upload for RAG
+
+          <div className="op-video-shell">
+            {videoUrl ? (
+              <video
+                ref={videoRef}
+                controls
+                crossOrigin="anonymous"
+                src={videoUrl}
+                className="op-video-player"
+                onLoadStart={() => {
+                  setVideoMetadataLoaded(false);
+                }}
+                onLoadedMetadata={() => {
+                  setVideoMetadataLoaded(true);
+                  if (videoRef.current?.videoWidth && videoRef.current.videoHeight) {
+                    setVideoAspectRatio(videoRef.current.videoWidth / videoRef.current.videoHeight);
+                  }
+                  setIngestError("");
+                  if (pendingVideoReadyStatus) {
+                    setIngestStatus(pendingVideoReadyStatus);
+                    setPendingVideoReadyStatus("");
+                  }
+                }}
+                onError={() => {
+                  setVideoMetadataLoaded(false);
+                  setPendingVideoReadyStatus("");
+                  setIngestStatus("Video source failed to load in the player.");
+                  setIngestError(
+                    `Video player could not load the selected media. ${videoElementErrorMessage(videoRef.current)}`
+                  );
+                }}
+                onPause={async () => {
+                  const nextTs = videoRef.current?.currentTime ?? 0;
+                  setTimestamp(nextTs);
+                  setAnnotations([]);
+                  setAnnotationUndoStack([]);
+                  setIsPaused(true);
+                  if (videoId) {
+                    await loadTranscriptWindow(videoId, nextTs);
+                  }
+                }}
+                onPlay={() => {
+                  setAnnotations([]);
+                  setAnnotationUndoStack([]);
+                  setIsPaused(false);
+                }}
+                onTimeUpdate={() => {
+                  setTimestamp(videoRef.current?.currentTime ?? 0);
+                }}
+              />
+            ) : (
+              <div role="status" className="op-video-placeholder">
+                Upload the video with the menu above and the video media player will appear here
+              </div>
+            )}
+            {videoUrl && showTrackingOverlays && (
+              <svg
+                aria-hidden="true"
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  pointerEvents: "none",
+                  width: "100%",
+                  height: "100%",
+                }}
+                viewBox="0 0 100 100"
+                preserveAspectRatio="none"
+              >
+                {currentOverlay.map((overlay) => (
+                  <polygon
+                    key={`${overlay.track_id}-${overlay.timestamp}`}
+                    points={overlay.points.map((p) => `${p.x},${p.y}`).join(" ")}
+                    fill="none"
+                    stroke={overlay.color}
+                    strokeWidth={0.7}
+                    strokeDasharray="2 1.5"
+                    opacity={0.85}
+                  />
+                ))}
+              </svg>
+            )}
+            {videoUrl && (
+              <AnnotationOverlay
+                activeTool={activeTool}
+                annotations={annotations}
+                drawColor={drawColor}
+                isPaused={isPaused}
+                strokeWidth={strokeWidth}
+                textAnnotation={textAnnotation}
+                videoAspectRatio={videoAspectRatio}
+                onAnnotationsChange={setAnnotations}
+                onPushUndo={(entry) => setAnnotationUndoStack((prev) => [...prev, entry])}
+              />
+            )}
+          </div>
+        </section>
+
+        <aside>
+          <div className="op-card">
+            <div className="op-sidebar-section-header">
+              <h2 className="op-card-title" style={{ margin: 0 }}>
+                Vision &amp; Tracking Engine
+              </h2>
+              <button
+                type="button"
+                className="op-secondary-button"
+                onClick={() => setShowTranscript((current) => !current)}
+              >
+                {showTranscript ? "Hide Transcript" : "Show Transcript"}
+              </button>
+            </div>
+            <label className="op-checkbox-row">
+              <input
+                type="checkbox"
+                checked={trackingEnabled}
+                onChange={(event) => setTrackingEnabled(event.target.checked)}
+              />
+              <span>Enable SAM3 Tracking</span>
+            </label>
+            <label className="op-checkbox-row">
+              <input
+                type="checkbox"
+                checked={showTrackingOverlays}
+                onChange={(event) => setShowTrackingOverlays(event.target.checked)}
+              />
+              <span>Enable SAM3 Overlay</span>
+            </label>
+            <label className="op-checkbox-row">
+              <input
+                type="checkbox"
+                checked={sendAnnotatedSnapshot}
+                onChange={(event) => setSendAnnotatedSnapshot(event.target.checked)}
+              />
+              <span>Send Annotated Snapshot</span>
+            </label>
+            <p className="op-help-text">
+              Frame at {formatTimestamp(timestamp)}. Default payload sends the original frame plus
+              annotation JSON; the annotated snapshot is optional.
+            </p>
+            {showTranscript && (
+              <div className="op-transcript-panel">
+                {transcriptWindow?.source && (
+                  <p
+                    className={`op-transcript-badge ${
+                      transcriptWindow.source === "whisper"
+                        ? "op-transcript-badge-whisper"
+                        : "op-transcript-badge-fallback"
+                    }`}
+                  >
+                    Transcript source:{" "}
+                    {transcriptWindow.source === "whisper"
+                      ? `Whisper${transcriptWindow.model ? ` (${transcriptWindow.model})` : ""}`
+                      : transcriptWindow.source === "fallback"
+                        ? "fallback timestamps"
+                        : "empty"}
+                  </p>
+                )}
+                {transcriptError && (
+                  <p role="alert" className="op-error-text" style={{ marginTop: 0 }}>
+                    {transcriptError}
+                  </p>
+                )}
+                <pre>
+                  {transcriptWindow
+                    ? transcriptWindow.segments
+                        .map(
+                          (segment) =>
+                            `[${formatTimestamp(segment.start)}-${formatTimestamp(segment.end)}] ${segment.text}`
+                        )
+                        .join("\n")
+                    : "No transcript loaded yet. Pause the video to load the current window."}
+                </pre>
+              </div>
+            )}
+          </div>
+
+          <div className="op-card">
+            <h2 className="op-card-title">Contextual RAG Documents</h2>
             <input
+              id="document-upload"
               type="file"
               accept=".txt,.md,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              hidden
               disabled={documentUploading}
               onChange={(event) => {
                 const file = event.target.files?.[0];
@@ -878,142 +942,122 @@ export default function Home() {
                 if (file) void handleDocumentUpload(file);
               }}
             />
-          </label>
-          {documentStatus && (
-            <p role="status" style={{ color: "#9ecbff", margin: 0 }}>
-              {documentStatus}
+            <label htmlFor="document-upload" className="op-attach-button">
+              {documentUploading
+                ? "Uploading document..."
+                : "Attach user manuals or documents (.pdf, .md)"}
+            </label>
+            {documentStatus && (
+              <p role="status" className="op-status-text">
+                {documentStatus}
+              </p>
+            )}
+            {documentError && (
+              <p role="alert" className="op-error-text">
+                {documentError}
+              </p>
+            )}
+            {documents.length ? (
+              <div className="op-document-list">
+                {documents.map((document) => (
+                  <label key={document.id} className="op-document-item">
+                    <input
+                      type="checkbox"
+                      checked={selectedDocumentIds.includes(document.id)}
+                      onChange={() => toggleDocumentSelection(document.id)}
+                    />
+                    <span>
+                      {document.filename}
+                      <div className="op-document-meta">{document.chunkCount} chunks</div>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            ) : null}
+            <p className="op-help-text">
+              RAG attached: {selectedDocumentIds.length ? `${selectedDocumentIds.length} document(s)` : "none"}
             </p>
-          )}
-          {documentError && (
-            <p role="alert" style={{ color: "#ff7b72", margin: 0 }}>
-              {documentError}
-            </p>
-          )}
-          {documents.length ? (
-            <div style={{ display: "grid", gap: 6 }}>
-              {documents.map((document) => (
-                <label
-                  key={document.id}
-                  style={{
-                    alignItems: "flex-start",
-                    display: "flex",
-                    gap: 6,
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedDocumentIds.includes(document.id)}
-                    onChange={() => toggleDocumentSelection(document.id)}
-                  />
-                  <span>
-                    {document.filename}
-                    <span style={{ color: "#8b949e" }}> ({document.chunkCount} chunks)</span>
-                  </span>
-                </label>
-              ))}
-            </div>
-          ) : (
-            <p style={{ color: "#8b949e", margin: 0 }}>
-              Upload a PDF, DOCX, markdown, or text file to ground answers in manuals.
-            </p>
-          )}
-          <p style={{ color: "#8b949e", margin: 0 }}>
-            RAG attached: {selectedDocumentIds.length ? `${selectedDocumentIds.length} document(s)` : "none"}
-          </p>
-        </section>
-        <form onSubmit={handleAsk} style={{ display: "grid", gap: 8, marginTop: 12 }}>
-          <label style={{ display: "grid", gap: 6 }}>
-            Model
+          </div>
+
+          <div className="op-card">
+            <h2 className="op-card-title">Vision Language Model (VLM)</h2>
             <select
+              className="op-select"
               value={selectedModel}
               disabled={loading}
               onChange={(event) => setSelectedModel(event.target.value)}
             >
               {RAGVLM_MODELS.map((model) => (
                 <option key={model.value} value={model.value}>
-                  {model.family}: {model.label}
+                  {model.label}
                 </option>
               ))}
             </select>
-          </label>
-          <p style={{ color: "#8b949e", margin: 0 }}>
-            Active model: <code>{selectedModel}</code>
-          </p>
-          <textarea
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            rows={4}
-            placeholder="Ask about the current frame..."
-          />
-          <button type="submit" disabled={loading || ingesting || !videoId || !videoMetadataLoaded}>
-            {loading ? "Reasoning..." : "Ask"}
-          </button>
-        </form>
-        <h3>Chat</h3>
-        <div style={{ display: "grid", gap: 8 }}>
-          {chatMessages.length ? (
-            chatMessages.map((message) => (
-              <div
-                key={message.id}
-                style={{
-                  background:
-                    message.role === "user"
-                      ? "#0d1117"
-                      : message.error
-                        ? "rgba(248, 81, 73, 0.12)"
-                        : "#111827",
-                  border: `1px solid ${message.error ? "#7f1d1d" : "#30363d"}`,
-                  borderRadius: 8,
-                  color: message.error ? "#ffb4ad" : "#f0f6fc",
-                  padding: 10,
-                  whiteSpace: "pre-wrap",
-                }}
-              >
-                <strong>{message.role === "user" ? "You" : "OperatorOS"}</strong>
-                {message.model && (
-                  <div style={{ color: "#8b949e", fontSize: 12, marginTop: 4 }}>
-                    Model: <code>{message.model}</code>
-                  </div>
+            <p className="op-help-text">Active model: {selectedModelLabel}</p>
+          </div>
+
+          <div className="op-card">
+            <h2 className="op-card-title">Conversation</h2>
+            <div className="op-chat-panel">
+              <div className="op-chat-history">
+                {chatMessages.length ? (
+                  chatMessages.map((message) => (
+                    <div
+                      key={message.id}
+                      className={`op-chat-bubble ${
+                        message.role === "user"
+                          ? "op-chat-bubble-user"
+                          : message.error
+                            ? "op-chat-bubble-error"
+                            : "op-chat-bubble-assistant"
+                      }`}
+                    >
+                      <div className="op-chat-meta">
+                        {message.role === "user" ? "User" : "Operator OS"}
+                        {message.model ? ` · ${message.model}` : ""}
+                        {message.documents?.length ? ` · RAG: ${message.documents.join(", ")}` : ""}
+                        {message.role === "user"
+                          ? ` · snapshot ${message.annotatedSnapshot ? "sent" : "not sent"}`
+                          : ""}
+                      </div>
+                      {message.content}
+                    </div>
+                  ))
+                ) : (
+                  <p className="op-chat-empty">Ask anything about the paused frame to start a conversation.</p>
                 )}
-                {message.documents?.length ? (
-                  <div style={{ color: "#8b949e", fontSize: 12, marginTop: 4 }}>
-                    RAG: {message.documents.join(", ")}
-                  </div>
-                ) : null}
-                {message.role === "user" && (
-                  <div style={{ color: "#8b949e", fontSize: 12, marginTop: 4 }}>
-                    Annotated snapshot: {message.annotatedSnapshot ? "included" : "not sent"}
-                  </div>
-                )}
-                <div style={{ marginTop: 6 }}>{message.content}</div>
               </div>
-            ))
-          ) : (
-            <p style={{ color: "#8b949e" }}>Ask about the paused frame to start a chat.</p>
-          )}
-        </div>
-        <h3>Transcript Window</h3>
-        {transcriptWindow?.source && (
-          <p style={{ color: transcriptWindow.source === "whisper" ? "#7ee787" : "#f2cc60" }}>
-            Transcript source:{" "}
-            {transcriptWindow.source === "whisper"
-              ? `Whisper${transcriptWindow.model ? ` (${transcriptWindow.model})` : ""}`
-              : transcriptWindow.source === "fallback"
-                ? "fallback timestamps"
-                : "empty"}
-          </p>
-        )}
-        {transcriptError && (
-          <p role="alert" style={{ color: "#f2cc60" }}>
-            {transcriptError}
-          </p>
-        )}
-        <pre style={{ whiteSpace: "pre-wrap" }}>
-          {transcriptWindow
-            ? transcriptWindow.segments.map((s) => `[${formatTimestamp(s.start)}-${formatTimestamp(s.end)}] ${s.text}`).join("\n")
-            : "No transcript loaded"}
-        </pre>
-      </section>
-    </main>
+
+              <form className="op-chat-form" onSubmit={handleAsk}>
+                <div className="op-chat-input-row">
+                  <textarea
+                    className="op-chat-input"
+                    value={question}
+                    onChange={(event) => setQuestion(event.target.value)}
+                    rows={2}
+                    placeholder="Ask anything..."
+                  />
+                  <button
+                    type="submit"
+                    className="op-send-button"
+                    aria-label={loading ? "Sending question" : "Send question"}
+                    disabled={loading || ingesting || !videoId || !videoMetadataLoaded}
+                  >
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+                      <path
+                        d="M4 12 L20 4 L14 20 L12 13 Z"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
   );
 }

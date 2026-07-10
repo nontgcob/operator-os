@@ -2,3 +2,7 @@ fastapi
 uvicorn[standard]
 pydantic
 redis
+ultralytics
+timm
+huggingface_hub
+safetensors

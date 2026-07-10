@@ -35,6 +35,7 @@ services:
         required: false
     volumes:
       - ./data:/app/data
+      - ./models:/app/models:ro
     depends_on:
       - redis
     ports:

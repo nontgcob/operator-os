@@ -80,6 +80,7 @@ async def health() -> dict[str, Any]:
         "backend": backend_status.backend,
         "backend_ready": backend_status.ready,
         "backend_error": backend_status.code,
+        "backend_message": backend_status.message,
     }
 
 

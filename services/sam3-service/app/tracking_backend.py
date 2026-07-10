@@ -4,6 +4,7 @@ import asyncio
 import importlib.util
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Protocol
@@ -44,6 +45,7 @@ class TrackingBackendConfig:
     frame_interval_seconds: float = 1.0
     simulation_steps: int = 10
     simulation_delay_seconds: float = 0.35
+    max_polygon_points: int = 160
 
     @classmethod
     def from_env(cls) -> "TrackingBackendConfig":
@@ -59,6 +61,7 @@ class TrackingBackendConfig:
             frame_interval_seconds=max(0.001, _env_float("SAM3_FRAME_INTERVAL_SECONDS", 1.0)),
             simulation_steps=max(1, _env_int("SAM3_SIMULATION_STEPS", 10)),
             simulation_delay_seconds=max(0.0, _env_float("SAM3_SIMULATION_DELAY_SECONDS", 0.35)),
+            max_polygon_points=max(8, _env_int("SAM3_MAX_POLYGON_POINTS", 160)),
         )
 
 
@@ -130,16 +133,16 @@ class Sam3TrackingBackend:
 
     def __init__(self, config: TrackingBackendConfig) -> None:
         self.config = config
-        self._model: Any | None = None
+        self._predictors: dict[str, Any] = {}
         self._model_lock = asyncio.Lock()
 
     def status(self) -> TrackingBackendStatus:
-        if importlib.util.find_spec("sam3") is None:
+        if importlib.util.find_spec("ultralytics") is None:
             return TrackingBackendStatus(
                 backend=self.name,
                 ready=False,
                 code="sam3_dependency_missing",
-                message="Python package 'sam3' is not installed in this environment.",
+                message="Python package 'ultralytics' is not installed in this environment.",
             )
         if self.config.checkpoint_path is not None and not self.config.checkpoint_path.exists():
             return TrackingBackendStatus(
@@ -155,7 +158,7 @@ class Sam3TrackingBackend:
                 code="sam3_checkpoint_missing",
                 message=(
                     "SAM3_CHECKPOINT_PATH is not configured. Set a checkpoint path, or set "
-                    "SAM3_ALLOW_HF_DOWNLOAD=true to allow the sam3 package to download weights."
+                    "the working directory model path to a local Ultralytics-compatible sam3.pt."
                 ),
             )
         return TrackingBackendStatus(backend=self.name, ready=True)
@@ -185,26 +188,31 @@ class Sam3TrackingBackend:
     def _video_path(self, video_id: str) -> Path:
         return self.config.video_root / video_id / "source.mp4"
 
-    async def _load_model(self) -> Any:
+    async def _load_predictor(self, predictor_type: str) -> Any:
         async with self._model_lock:
-            if self._model is not None:
-                return self._model
+            if predictor_type in self._predictors:
+                return self._predictors[predictor_type]
 
             def load_model() -> Any:
-                from sam3.model_builder import build_sam3_video_model
+                from ultralytics.models.sam import SAM3VideoPredictor, SAM3VideoSemanticPredictor
 
-                kwargs: dict[str, Any] = {
-                    "checkpoint_path": str(self.config.checkpoint_path)
-                    if self.config.checkpoint_path
-                    else None,
-                    "load_from_HF": self.config.allow_hf_download,
+                model_path = str(self.config.checkpoint_path) if self.config.checkpoint_path else "sam3.pt"
+                os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+                overrides: dict[str, Any] = {
+                    "conf": 0.25,
+                    "task": "segment",
+                    "mode": "predict",
+                    "model": model_path,
+                    "compile": False,
+                    "verbose": False,
                 }
                 if self.config.device:
-                    kwargs["device"] = self.config.device
-                return build_sam3_video_model(**kwargs)
+                    overrides["device"] = self.config.device
+                predictor_cls = SAM3VideoPredictor if predictor_type == "boxes" else SAM3VideoSemanticPredictor
+                return predictor_cls(overrides=overrides)
 
-            self._model = await asyncio.to_thread(load_model)
-            return self._model
+            self._predictors[predictor_type] = await asyncio.to_thread(load_model)
+            return self._predictors[predictor_type]
 
     async def _track_in_worker(self, job: TrackingJob, video_path: Path) -> AsyncIterator[dict[str, Any]]:
         loop = asyncio.get_running_loop()
@@ -216,7 +224,8 @@ class Sam3TrackingBackend:
 
         async def load_model() -> Any:
             try:
-                return await self._load_model()
+                predictor_type = "boxes" if annotation_boxes_xywh(job.annotations) else "text"
+                return await self._load_predictor(predictor_type)
             except Exception as exc:  # pragma: no cover - depends on external SAM3 runtime.
                 return exc
 
@@ -256,51 +265,39 @@ class Sam3TrackingBackend:
 
     def _run_sam3_sync(
         self,
-        model: Any,
+        predictor: Any,
         job: TrackingJob,
         video_path: Path,
     ) -> Iterator[dict[str, Any]]:
-        inference_state = model.init_state(resource_path=str(video_path))
-        frame_idx = max(0, round(job.timestamp / self.config.frame_interval_seconds))
+        clip_path, frame_width, frame_height = self._clip_from_timestamp(video_path, job)
         boxes = annotation_boxes_xywh(job.annotations)
         prompt = job.segmentation_prompt or job.question
-        box_labels = [1] * len(boxes) if boxes else None
-        prompt_boxes = boxes or None
+        overlays: list[dict[str, Any]] = []
 
-        _, outputs = model.add_prompt(
-            inference_state,
-            frame_idx=frame_idx,
-            text_str=prompt,
-            boxes_xywh=prompt_boxes,
-            box_labels=box_labels,
-        )
-
-        overlays = outputs_to_overlays(outputs, timestamp=job.timestamp)
-        yield {
-            "done": False,
-            "progress": 5,
-            "overlays": overlays,
-            "backend": self.name,
-        }
+        if boxes:
+            pixel_boxes = [_xywh_unit_to_xyxy_pixels(box, frame_width, frame_height) for box in boxes]
+            results = predictor(source=str(clip_path), bboxes=pixel_boxes, stream=True)
+        else:
+            results = predictor(source=str(clip_path), text=[prompt], stream=True)
 
         total = self.config.max_frames
-        for index, (out_frame_idx, out) in enumerate(
-            model.propagate_in_video(
-                inference_state,
-                start_frame_idx=frame_idx,
-                max_frame_num_to_track=total,
-                reverse=False,
-            ),
-            start=1,
-        ):
-            timestamp = out_frame_idx * self.config.frame_interval_seconds
-            overlays.extend(outputs_to_overlays(out, timestamp=timestamp))
+        for index, result in enumerate(results, start=1):
+            timestamp = job.timestamp + ((index - 1) * self.config.frame_interval_seconds)
+            overlays.extend(
+                ultralytics_result_to_overlays(
+                    result,
+                    timestamp=timestamp,
+                    max_polygon_points=self.config.max_polygon_points,
+                )
+            )
             yield {
                 "done": False,
-                "progress": min(99, 5 + round((index / total) * 90)),
+                "progress": min(99, round((index / total) * 100)),
                 "overlays": overlays,
                 "backend": self.name,
             }
+            if index >= total:
+                break
 
         yield {
             "done": True,
@@ -308,6 +305,95 @@ class Sam3TrackingBackend:
             "overlays": overlays,
             "backend": self.name,
         }
+
+    def _clip_from_timestamp(self, video_path: Path, job: TrackingJob) -> tuple[Path, int, int]:
+        import cv2
+
+        output_path = Path(tempfile.gettempdir()) / f"operatoros-sam3-{job.tracking_job_id}.mp4"
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
+            return self._clip_from_extracted_frames(video_path, job, output_path)
+
+        fps = capture.get(cv2.CAP_PROP_FPS) or (1.0 / self.config.frame_interval_seconds)
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        start_frame = max(0, round(job.timestamp * fps))
+        frame_step = max(1, round(self.config.frame_interval_seconds * fps))
+        writer = cv2.VideoWriter(
+            str(output_path),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            1.0 / self.config.frame_interval_seconds,
+            (width, height),
+        )
+        if not writer.isOpened():
+            capture.release()
+            raise RuntimeError("Unable to create temporary SAM3 tracking clip.")
+
+        written = 0
+        try:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            while written < self.config.max_frames:
+                ok, frame = capture.read()
+                if not ok:
+                    break
+                writer.write(frame)
+                written += 1
+                for _ in range(frame_step - 1):
+                    if not capture.grab():
+                        break
+        finally:
+            writer.release()
+            capture.release()
+
+        if written == 0:
+            return self._clip_from_extracted_frames(video_path, job, output_path)
+
+        return output_path, width, height
+
+    def _clip_from_extracted_frames(
+        self,
+        video_path: Path,
+        job: TrackingJob,
+        output_path: Path,
+    ) -> tuple[Path, int, int]:
+        import cv2
+
+        frame_dir = video_path.parent / "frames"
+        frame_paths = sorted(frame_dir.glob("frame_*.jpg"))
+        if not frame_paths:
+            raise RuntimeError(
+                "Unable to decode video for SAM3 tracking and no extracted JPEG frames were found."
+            )
+
+        start_index = max(0, round(job.timestamp / self.config.frame_interval_seconds))
+        selected = frame_paths[start_index : start_index + self.config.max_frames]
+        if not selected:
+            raise RuntimeError("No extracted frames are available at the requested SAM3 timestamp.")
+
+        first = cv2.imread(str(selected[0]))
+        if first is None:
+            raise RuntimeError(f"Unable to read extracted frame for SAM3 tracking: {selected[0]}")
+        height, width = first.shape[:2]
+        writer = cv2.VideoWriter(
+            str(output_path),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            1.0 / self.config.frame_interval_seconds,
+            (width, height),
+        )
+        if not writer.isOpened():
+            raise RuntimeError("Unable to create temporary SAM3 tracking clip from extracted frames.")
+
+        try:
+            writer.write(first)
+            for frame_path in selected[1:]:
+                frame = cv2.imread(str(frame_path))
+                if frame is None:
+                    continue
+                writer.write(frame)
+        finally:
+            writer.release()
+
+        return output_path, width, height
 
 
 def build_tracking_backend(config: TrackingBackendConfig | None = None) -> TrackingBackend:
@@ -386,6 +472,111 @@ def outputs_to_overlays(outputs: Any, timestamp: float) -> list[dict[str, Any]]:
             }
         )
     return overlays
+
+
+def ultralytics_result_to_overlays(
+    result: Any,
+    timestamp: float,
+    max_polygon_points: int = 160,
+) -> list[dict[str, Any]]:
+    orig_shape = getattr(result, "orig_shape", None)
+    if not isinstance(orig_shape, tuple) or len(orig_shape) < 2:
+        return []
+    height, width = float(orig_shape[0]), float(orig_shape[1])
+    if width <= 0 or height <= 0:
+        return []
+
+    overlays: list[dict[str, Any]] = []
+    masks = getattr(result, "masks", None)
+    polygons = getattr(masks, "xy", None)
+    if isinstance(polygons, list):
+        for index, polygon in enumerate(polygons):
+            points = _polygon_to_percent_points(polygon, width, height)
+            points = _downsample_points(points, max_polygon_points)
+            if len(points) < 3:
+                continue
+            overlays.append(
+                {
+                    "track_id": f"sam3-mask-{index + 1}",
+                    "label": f"SAM3 Mask {index + 1}",
+                    "color": DEFAULT_OVERLAY_COLOR,
+                    "timestamp": timestamp,
+                    "points": points,
+                }
+            )
+        if overlays:
+            return overlays
+
+    boxes = getattr(result, "boxes", None)
+    xyxy = _to_list(getattr(boxes, "xyxy", None))
+    confs = _to_list(getattr(boxes, "conf", None))
+    ids = _to_list(getattr(boxes, "id", None))
+    for index, box in enumerate(xyxy):
+        if not isinstance(box, list) or len(box) < 4:
+            continue
+        obj_id = ids[index] if index < len(ids) else index + 1
+        score = confs[index] if index < len(confs) else None
+        overlays.append(
+            {
+                "track_id": f"sam3-{obj_id}",
+                "label": _overlay_label(obj_id, score),
+                "color": DEFAULT_OVERLAY_COLOR,
+                "timestamp": timestamp,
+                "points": _xyxy_pixels_to_points(box, width, height),
+            }
+        )
+    return overlays
+
+
+def _downsample_points(
+    points: list[dict[str, float]],
+    max_points: int,
+) -> list[dict[str, float]]:
+    if len(points) <= max_points:
+        return points
+    step = len(points) / max_points
+    return [points[min(len(points) - 1, round(index * step))] for index in range(max_points)]
+
+
+def _xywh_unit_to_xyxy_pixels(box: list[float], width: int, height: int) -> list[float]:
+    x, y, box_width, box_height = box
+    return [
+        _clamp_unit(x) * width,
+        _clamp_unit(y) * height,
+        _clamp_unit(x + box_width) * width,
+        _clamp_unit(y + box_height) * height,
+    ]
+
+
+def _xyxy_pixels_to_points(box: list[Any], width: float, height: float) -> list[dict[str, float]]:
+    x1, y1, x2, y2 = (_number(value) or 0.0 for value in box[:4])
+    return [
+        {"x": _clamp_percent((x1 / width) * 100), "y": _clamp_percent((y1 / height) * 100)},
+        {"x": _clamp_percent((x2 / width) * 100), "y": _clamp_percent((y1 / height) * 100)},
+        {"x": _clamp_percent((x2 / width) * 100), "y": _clamp_percent((y2 / height) * 100)},
+        {"x": _clamp_percent((x1 / width) * 100), "y": _clamp_percent((y2 / height) * 100)},
+    ]
+
+
+def _polygon_to_percent_points(polygon: Any, width: float, height: float) -> list[dict[str, float]]:
+    raw_points = polygon.tolist() if hasattr(polygon, "tolist") else polygon
+    if not isinstance(raw_points, list):
+        return []
+    points: list[dict[str, float]] = []
+    for point in raw_points:
+        if not isinstance(point, list) or len(point) < 2:
+            continue
+        x = _number(point[0])
+        y = _number(point[1])
+        if x is None or y is None:
+            continue
+        points.append(
+            {
+                "x": _clamp_percent((x / width) * 100),
+                "y": _clamp_percent((y / height) * 100),
+            }
+        )
+    return points
 
 
 def _annotation_box(annotation: dict[str, Any]) -> list[float] | None:
