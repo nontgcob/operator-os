@@ -5,16 +5,90 @@ interface ParsedModelResponse {
   annotations: Annotation[];
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function inRange(value: unknown, min: number, max: number): value is number {
+  return isFiniteNumber(value) && value >= min && value <= max;
+}
+
+function isPoint(value: unknown): value is { x: number; y: number } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    inRange((value as { x?: unknown }).x, 0, 1000) &&
+    inRange((value as { y?: unknown }).y, 0, 1000)
+  );
+}
+
+function isPointTuple(value: unknown): value is number[] {
+  return (
+    Array.isArray(value) &&
+    value.length >= 2 &&
+    inRange(value[0], 0, 1000) &&
+    inRange(value[1], 0, 1000)
+  );
+}
+
+function hasValidPoints(value: unknown, minPoints = 1): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length >= minPoints &&
+    value.every((point) => isPoint(point) || isPointTuple(point))
+  );
+}
+
+function isValidAnnotation(annotation: unknown): annotation is Annotation {
+  if (typeof annotation !== "object" || annotation === null) return false;
+  const candidate = annotation as Annotation;
+  if (typeof candidate.type !== "string") return false;
+
+  switch (candidate.type) {
+    case "rect":
+      return (
+        inRange(candidate.x, 0, 1000) &&
+        inRange(candidate.y, 0, 1000) &&
+        inRange(candidate.width, 0, 1000) &&
+        inRange(candidate.height, 0, 1000) &&
+        (candidate.width ?? 0) > 0 &&
+        (candidate.height ?? 0) > 0
+      );
+    case "circle":
+      return (
+        inRange(candidate.cx ?? candidate.x, 0, 1000) &&
+        inRange(candidate.cy ?? candidate.y, 0, 1000) &&
+        inRange(candidate.r ?? candidate.radius, 0, 1000) &&
+        ((candidate.r ?? candidate.radius) ?? 0) > 0
+      );
+    case "arrow":
+      return (
+        inRange(candidate.x1, 0, 1000) &&
+        inRange(candidate.y1, 0, 1000) &&
+        inRange(candidate.x2, 0, 1000) &&
+        inRange(candidate.y2, 0, 1000)
+      );
+    case "path":
+      return typeof candidate.d === "string" || hasValidPoints(candidate.points, 2);
+    case "polygon":
+      return hasValidPoints(candidate.points, 3);
+    case "text":
+    case "number":
+      return (
+        inRange(candidate.x, 0, 1000) &&
+        inRange(candidate.y, 0, 1000) &&
+        (typeof candidate.text === "string" ||
+          typeof candidate.content === "string" ||
+          typeof candidate.value === "number")
+      );
+    default:
+      return false;
+  }
+}
+
 function parseAnnotationArray(value: unknown): Annotation[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((annotation): annotation is Annotation => {
-    return (
-      typeof annotation === "object" &&
-      annotation !== null &&
-      "type" in annotation &&
-      typeof (annotation as { type?: unknown }).type === "string"
-    );
-  });
+  return value.filter(isValidAnnotation);
 }
 
 function responseFromJson(value: unknown, fallback: string): ParsedModelResponse | null {

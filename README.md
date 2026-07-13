@@ -1,4 +1,4 @@
-# OperatorOS
+ose # OperatorOS
 
 OperatorOS is a video-first multimodal orchestration platform built around a reusable RAGVLM reasoning engine.
 

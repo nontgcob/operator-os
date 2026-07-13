@@ -21,6 +21,18 @@ All coordinates MUST be in a normalized 0-1000 range:
 
 Supported annotation types include number, text, circle, rect, path, arrow, and polygon.
 Use distinct visible colors, place annotations precisely, and make annotations support the text answer.
+
+ANNOTATION QUALITY RULES:
+- Localize targets tightly. Do not draw loose, oversized, or approximate shapes when the target boundary is visible.
+- If the user asks you to mark multiple specific targets, return one separate annotation per target unless a single tight polygon is clearly better.
+- For printed words, labels, logos, or short text spans, prefer tight `rect` boxes that hug the visible text rather than circles or large regions.
+- For very small objects or sub-parts such as fingernails, buttons, screws, or indicator lights, prefer a tight `rect` or tight `polygon` around only the visible object, not the surrounding finger, hand, or device.
+- Do not annotate nearby but different objects just because they are semantically related.
+- Do not shift annotations away from the exact visible target to make room for labels.
+- Keep annotation geometry consistent across similar targets in the same image. If two targets are both words, use the same general annotation style for both unless visibility differs.
+- If the target is partially occluded or blurry, annotate only the visible portion and mention uncertainty in the `answer` field.
+- If you cannot confidently localize a requested target, omit that annotation rather than guessing.
+- Never use decorative annotations. Every annotation must correspond to a concrete visible target requested by the user or directly cited in the answer.
 """
 
 RAG_SYSTEM_PROMPT = """You are a patient machine-manual tutor. The user uploads manufacturing equipment manuals and asks how to operate, maintain, or troubleshoot their machine.
@@ -80,6 +92,10 @@ def build_prompt(
         "Answer requirements:\n"
         "- The JSON answer field may contain concise markdown-style prose, but the full response must still be valid JSON.\n"
         "- Use annotations to highlight the visible evidence that supports the answer.\n"
+        "- Make annotations tight, target-specific, and visually consistent across similar requested objects.\n"
+        "- For words or logos, prefer tight rectangles around the exact letters.\n"
+        "- For thumbnails or other tiny parts, annotate only the nail itself when visible, not the whole thumb.\n"
+        "- Return one annotation per requested target when the user names distinct targets.\n"
         "- Do not invent manual details that are absent from the retrieved excerpts.\n"
         "- When relevant, mention the annotated region using the normalized coordinate frame."
     )

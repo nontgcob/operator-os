@@ -100,6 +100,58 @@ function pathPoints(d: string): Array<{ x: number; y: number }> {
   return points;
 }
 
+// Shift annotations down by 1/8 of the video height (1000 * 1/8 = 125)
+function clampRagvlmLocal(value: number) {
+  return Math.min(1000, Math.max(0, value));
+}
+
+function translatePathD(d: string | undefined, dx: number, dy: number) {
+  if (!d) return d;
+  let isX = true;
+  return d.replace(/([-+]?\d*\.?\d+)/g, (match) => {
+    const num = parseFloat(match);
+    const next = isX ? num + dx : num + dy;
+    isX = !isX;
+    return String(next);
+  });
+}
+
+function shiftAnnotationDown(annotation: Annotation, dy = 125): Annotation {
+  switch (annotation.type) {
+    case "rect":
+    case "text":
+    case "number":
+      return { ...annotation, y: annotation.y !== undefined ? clampRagvlmLocal(annotation.y + dy) : annotation.y };
+    case "circle":
+      return {
+        ...annotation,
+        cy: annotation.cy !== undefined ? clampRagvlmLocal(annotation.cy + dy) : annotation.cy,
+        y: annotation.y !== undefined ? clampRagvlmLocal(annotation.y + dy) : annotation.y,
+      };
+    case "arrow":
+      return {
+        ...annotation,
+        y1: annotation.y1 !== undefined ? clampRagvlmLocal(annotation.y1 + dy) : annotation.y1,
+        y2: annotation.y2 !== undefined ? clampRagvlmLocal(annotation.y2 + dy) : annotation.y2,
+      };
+    case "path":
+      return {
+        ...annotation,
+        d: translatePathD(annotation.d, 0, dy),
+        points: (annotation.points ?? []).map((p) =>
+          Array.isArray(p) ? [p[0], clampRagvlmLocal((p[1] as number) + dy)] : { x: p.x, y: clampRagvlmLocal(p.y + dy) }
+        ),
+      };
+    case "polygon":
+      return {
+        ...annotation,
+        points: (annotation.points ?? []).map((p) => (Array.isArray(p) ? [p[0], clampRagvlmLocal((p[1] as number) + dy)] : [p.x, clampRagvlmLocal(p.y + dy)])),
+      } as Annotation;
+    default:
+      return annotation;
+  }
+}
+
 function drawCanvasArrow(
   ctx: CanvasRenderingContext2D,
   x1: number,
@@ -211,9 +263,10 @@ export default function Home() {
   const [transcriptWindow, setTranscriptWindow] = useState<TranscriptWindowResponse | null>(null);
   const [transcriptError, setTranscriptError] = useState("");
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [modelAnnotations, setModelAnnotations] = useState<Annotation[]>([]);
   const [trackingOverlays, setTrackingOverlays] = useState<TrackingOverlay[]>([]);
-  const [trackingEnabled, setTrackingEnabled] = useState(true);
-  const [showTrackingOverlays, setShowTrackingOverlays] = useState(true);
+  const [trackingEnabled, setTrackingEnabled] = useState(false);
+  const [showTrackingOverlays, setShowTrackingOverlays] = useState(false);
   const [sendAnnotatedSnapshot, setSendAnnotatedSnapshot] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [activeTool, setActiveTool] = useState<AnnotationType>("cursor");
@@ -241,6 +294,7 @@ export default function Home() {
     setTranscriptWindow(null);
     setTranscriptError("");
     setAnnotations([]);
+    setModelAnnotations([]);
     setAnnotationUndoStack([]);
     setTrackingOverlays([]);
     setChatMessages([]);
@@ -625,8 +679,69 @@ export default function Home() {
         )
       );
       if (parsed.annotations.length) {
-        setAnnotations((prev) => [...prev, ...parsed.annotations]);
-        setAnnotationUndoStack((prev) => [...prev, { op: "pop", count: parsed.annotations.length }]);
+        // Shift machine/model-generated annotations down by 1/32 of the video
+        // height (in ragvlm_0_1000 coords that's 1000 * 1/32 ≈ 31.25 → 31).
+        const SHIFT_Y = Math.round(1000 / 32);
+        const clampRagvlm = (v: number) => Math.min(1000, Math.max(0, Math.round(v)));
+
+        function translateD(d: string | undefined, dy: number) {
+          if (!d) return d;
+          let isX = true;
+          return d.replace(/([-+]?\d*\.?\d+)/g, (match) => {
+            const n = parseFloat(match);
+            if (Number.isNaN(n)) return match;
+            if (isX) {
+              isX = false;
+              return String(n);
+            }
+            isX = true;
+            return String(clampRagvlm(n + dy));
+          });
+        }
+
+        function shiftAnnotation(a: Annotation): Annotation {
+          switch (a.type) {
+            case "rect":
+            case "text":
+            case "number":
+              return { ...a, y: a.y !== undefined ? clampRagvlm(a.y + SHIFT_Y) : a.y };
+            case "circle":
+              return { ...a, cy: a.cy !== undefined ? clampRagvlm(a.cy + SHIFT_Y) : (a.y !== undefined ? clampRagvlm(a.y + SHIFT_Y) : a.cy) };
+            case "arrow":
+              return {
+                ...a,
+                y1: a.y1 !== undefined ? clampRagvlm(a.y1 + SHIFT_Y) : a.y1,
+                y2: a.y2 !== undefined ? clampRagvlm(a.y2 + SHIFT_Y) : a.y2,
+              };
+            case "path":
+              return {
+                ...a,
+                d: translateD(a.d, SHIFT_Y),
+                points: Array.isArray(a.points)
+                  ? a.points.map((p) => (Array.isArray(p) ? [p[0], clampRagvlm(p[1] + SHIFT_Y)] : { x: p.x, y: clampRagvlm(p.y + SHIFT_Y) }))
+                  : a.points,
+              };
+            case "polygon":
+              return {
+                ...a,
+                points: Array.isArray(a.points)
+                  ? a.points.map((p) => (Array.isArray(p) ? [p[0], clampRagvlm(p[1] + SHIFT_Y)] : p))
+                  : a.points,
+              };
+            default:
+              return a;
+          }
+        }
+
+        setModelAnnotations(
+          parsed.annotations.map((a) => ({
+            ...shiftAnnotation(a),
+            fontSize: a.fontSize ?? 1,
+            strokeWidth: a.strokeWidth ?? 3,
+          }))
+        );
+      } else {
+        setModelAnnotations([]);
       }
       if (trackingEnabled) {
         try {
@@ -812,6 +927,7 @@ export default function Home() {
                   const nextTs = videoRef.current?.currentTime ?? 0;
                   setTimestamp(nextTs);
                   setAnnotations([]);
+                  setModelAnnotations([]);
                   setAnnotationUndoStack([]);
                   setIsPaused(true);
                   if (videoId) {
@@ -820,6 +936,7 @@ export default function Home() {
                 }}
                 onPlay={() => {
                   setAnnotations([]);
+                  setModelAnnotations([]);
                   setAnnotationUndoStack([]);
                   setIsPaused(false);
                 }}
@@ -862,6 +979,7 @@ export default function Home() {
               <AnnotationOverlay
                 activeTool={activeTool}
                 annotations={annotations}
+                modelAnnotations={modelAnnotations}
                 drawColor={drawColor}
                 isPaused={isPaused}
                 strokeWidth={strokeWidth}

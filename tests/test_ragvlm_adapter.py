@@ -50,3 +50,21 @@ def test_prompt_includes_ragvlm_grounding_sections() -> None:
     assert "Normalized annotations:" in prompt
     assert "## Retrieved context" in prompt
     assert "lower valve before calibration" in prompt
+
+
+def test_prompt_includes_tight_annotation_quality_rules() -> None:
+    prompt = build_prompt(
+        "Draw boxes around the words CELSIUS and FIZZ-FREE and around both thumbnail nails.",
+        [],
+        "No transcript.",
+        "No retrieved document excerpts.",
+        model_family="qwen",
+        video_title="Can close-up inspection",
+    )
+
+    assert "ANNOTATION QUALITY RULES:" in prompt
+    assert "For printed words, labels, logos, or short text spans, prefer tight `rect` boxes" in prompt
+    assert "For very small objects or sub-parts such as fingernails" in prompt
+    assert "Keep annotation geometry consistent across similar targets in the same image" in prompt
+    assert "For thumbnails or other tiny parts, annotate only the nail itself when visible" in prompt
+    assert "Return one annotation per requested target when the user names distinct targets" in prompt

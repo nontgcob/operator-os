@@ -10,6 +10,7 @@ const MIN_DRAG_DISTANCE = 10;
 interface AnnotationOverlayProps {
   activeTool: AnnotationType;
   annotations: Annotation[];
+  modelAnnotations?: Annotation[];
   drawColor: string;
   isPaused: boolean;
   strokeWidth: number;
@@ -318,6 +319,7 @@ function renderAnnotation(
 export function AnnotationOverlay({
   activeTool,
   annotations,
+  modelAnnotations = [],
   drawColor,
   isPaused,
   strokeWidth,
@@ -575,6 +577,12 @@ export function AnnotationOverlay({
       onPointerUp={handlePointerUp}
       onPointerCancel={resetDraftAnnotation}
     >
+      {modelAnnotations.map((annotation, idx) =>
+        renderAnnotation(annotation, -(idx + 1), {
+          aspectRatio: videoAspectRatio,
+          interactive: false,
+        })
+      )}
       {annotations.map((annotation, idx) =>
         renderAnnotation(annotation, idx, {
           aspectRatio: videoAspectRatio,
