@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent } from "react";
-import type { Annotation, AnnotationType, AnnotationUndoEntry, Point } from "@/lib/types";
+import type { Annotation, AnnotationType, AnnotationUndoEntry, Point, TrackingOverlay } from "@/lib/types";
 
 const ANNOTATION_SCALE = 1.5;
 const MIN_DRAG_DISTANCE = 10;
@@ -11,6 +11,7 @@ interface AnnotationOverlayProps {
   activeTool: AnnotationType;
   annotations: Annotation[];
   modelAnnotations?: Annotation[];
+  trackingOverlays?: TrackingOverlay[];
   drawColor: string;
   isPaused: boolean;
   strokeWidth: number;
@@ -320,6 +321,7 @@ export function AnnotationOverlay({
   activeTool,
   annotations,
   modelAnnotations = [],
+  trackingOverlays = [],
   drawColor,
   isPaused,
   strokeWidth,
@@ -577,6 +579,18 @@ export function AnnotationOverlay({
       onPointerUp={handlePointerUp}
       onPointerCancel={resetDraftAnnotation}
     >
+      {trackingOverlays.map((overlay, idx) => (
+        <polygon
+          key={`tracking-${overlay.track_id}-${overlay.timestamp}-${idx}`}
+          points={overlay.points.map((p) => `${v(p.x)},${v(p.y)}`).join(" ")}
+          fill="none"
+          stroke={overlay.color}
+          strokeWidth={0.7}
+          strokeDasharray="2 1.5"
+          opacity={0.85}
+          style={{ pointerEvents: "none" }}
+        />
+      ))}
       {modelAnnotations.map((annotation, idx) =>
         renderAnnotation(annotation, -(idx + 1), {
           aspectRatio: videoAspectRatio,

@@ -6,3 +6,4 @@ ultralytics
 timm
 huggingface_hub
 safetensors
+git+https://github.com/openai/CLIP.git

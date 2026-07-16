@@ -949,37 +949,12 @@ export default function Home() {
                 Upload the video with the menu above and the video media player will appear here
               </div>
             )}
-            {videoUrl && showTrackingOverlays && (
-              <svg
-                aria-hidden="true"
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  pointerEvents: "none",
-                  width: "100%",
-                  height: "100%",
-                }}
-                viewBox="0 0 100 100"
-                preserveAspectRatio="none"
-              >
-                {currentOverlay.map((overlay) => (
-                  <polygon
-                    key={`${overlay.track_id}-${overlay.timestamp}`}
-                    points={overlay.points.map((p) => `${p.x},${p.y}`).join(" ")}
-                    fill="none"
-                    stroke={overlay.color}
-                    strokeWidth={0.7}
-                    strokeDasharray="2 1.5"
-                    opacity={0.85}
-                  />
-                ))}
-              </svg>
-            )}
             {videoUrl && (
               <AnnotationOverlay
                 activeTool={activeTool}
                 annotations={annotations}
                 modelAnnotations={modelAnnotations}
+                trackingOverlays={showTrackingOverlays ? currentOverlay : []}
                 drawColor={drawColor}
                 isPaused={isPaused}
                 strokeWidth={strokeWidth}
