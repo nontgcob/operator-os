@@ -143,6 +143,7 @@ export async function startTracking(input: {
   timestamp: number;
   frame_data_url: string;
   question: string;
+  segmentation_prompt?: string;
   annotations: Annotation[];
 }): Promise<{ tracking_job_id: string }> {
   const response = await fetch(`${BASE_URL}/tracking/start`, {

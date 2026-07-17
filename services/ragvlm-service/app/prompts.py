@@ -12,7 +12,7 @@ When responding to any question about an image, you MUST provide:
 CRITICAL JSON OUTPUT RULES:
 - Your ENTIRE response must be ONLY valid JSON - no text before or after
 - Do NOT wrap JSON in markdown code blocks
-- The JSON must have exactly two fields: "answer" (string) and "annotations" (array)
+- The JSON must have exactly four fields: "answer" (string), "annotations" (array), "tracking_prompt" (string), and "tracking_annotations" (array)
 
 All coordinates MUST be in a normalized 0-1000 range:
 - The top-left corner is (0, 0)
@@ -33,6 +33,9 @@ ANNOTATION QUALITY RULES:
 - If the target is partially occluded or blurry, annotate only the visible portion and mention uncertainty in the `answer` field.
 - If you cannot confidently localize a requested target, omit that annotation rather than guessing.
 - Never use decorative annotations. Every annotation must correspond to a concrete visible target requested by the user or directly cited in the answer.
+- If one object should be tracked through the video, put a tight rect/polygon/circle around that exact object in `tracking_annotations`.
+- Write `tracking_prompt` as a concise object description suitable for SAM3, grounded in the current frame only.
+- If there is no clearly trackable object, use an empty string for `tracking_prompt` and an empty array for `tracking_annotations`.
 """
 
 RAG_SYSTEM_PROMPT = """You are a patient machine-manual tutor. The user uploads manufacturing equipment manuals and asks how to operate, maintain, or troubleshoot their machine.
@@ -96,6 +99,8 @@ def build_prompt(
         "- For words or logos, prefer tight rectangles around the exact letters.\n"
         "- For thumbnails or other tiny parts, annotate only the nail itself when visible, not the whole thumb.\n"
         "- Return one annotation per requested target when the user names distinct targets.\n"
+        "- If tracking is appropriate, return `tracking_prompt` and `tracking_annotations` for the single object of interest.\n"
+        "- The tracking annotation must be tighter than a general explanatory annotation and must identify only the object SAM3 should follow.\n"
         "- Do not invent manual details that are absent from the retrieved excerpts.\n"
         "- When relevant, mention the annotated region using the normalized coordinate frame."
     )

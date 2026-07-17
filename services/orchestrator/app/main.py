@@ -12,8 +12,14 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from redis import Redis
-from rq import Queue
+
+try:
+    from services.common.env import load_env_file
+except ImportError:
+    load_env_file = None
+
+if load_env_file:
+    load_env_file()
 
 try:
     from .memory import append_rolling_conversation
@@ -32,6 +38,7 @@ RAGVLM_SERVICE_URL = os.getenv("RAGVLM_SERVICE_URL", "http://localhost:8001")
 VIDEO_SERVICE_URL = os.getenv("VIDEO_SERVICE_URL", "http://localhost:8002")
 SAM3_SERVICE_URL = os.getenv("SAM3_SERVICE_URL", "http://localhost:8003")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+USE_REDIS_STATE = os.getenv("USE_REDIS_STATE", "false").lower() == "true"
 
 
 def _env_positive_float(name: str, default: float) -> float:
@@ -48,8 +55,37 @@ def _env_positive_float(name: str, default: float) -> float:
 
 
 MEDIA_INGEST_TIMEOUT_SECONDS = _env_positive_float("MEDIA_INGEST_TIMEOUT_SECONDS", 900.0)
-redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
-tracking_queue = Queue("tracking", connection=Redis.from_url(REDIS_URL))
+
+
+class _MemoryState:
+    def __init__(self) -> None:
+        self._values: dict[str, tuple[float, str]] = {}
+
+    def get(self, key: str) -> str | None:
+        item = self._values.get(key)
+        if not item:
+            return None
+        expires_at, value = item
+        if expires_at <= time.time():
+            self._values.pop(key, None)
+            return None
+        return value
+
+    def setex(self, key: str, ttl: int, value: str) -> None:
+        self._values[key] = (time.time() + ttl, value)
+
+
+def _build_state_client() -> Any:
+    if not USE_REDIS_STATE:
+        return _MemoryState()
+    try:
+        from redis import Redis
+    except ImportError as exc:
+        raise RuntimeError("USE_REDIS_STATE=true requires the redis Python package") from exc
+    return Redis.from_url(REDIS_URL, decode_responses=True)
+
+
+state_client = _build_state_client()
 
 
 def _log_event(event_type: str, **fields: Any) -> None:
@@ -101,6 +137,7 @@ class TrackingStartRequest(BaseModel):
     timestamp: float
     frame_data_url: str
     question: str
+    segmentation_prompt: str | None = None
     annotations: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -131,6 +168,18 @@ def _build_segmentation_prompt(question: str, annotations: list[dict[str, Any]])
     if annotations:
         return f"Track the operator-referenced object related to: {question}"
     return f"Track the primary object relevant to question: {question}"
+
+
+def _enqueue_tracking_job(job_payload: dict[str, Any]) -> None:
+    try:
+        from redis import Redis
+        from rq import Queue
+    except ImportError as exc:
+        raise RuntimeError("USE_WORKER_QUEUE=true requires redis and rq Python packages") from exc
+    Queue("tracking", connection=Redis.from_url(REDIS_URL)).enqueue(
+        "workers.tasks.run_tracking_job",
+        job_payload,
+    )
 
 
 async def _retrieve_document_chunks(
@@ -366,23 +415,21 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
 @app.post("/tracking/start")
 async def tracking_start(payload: TrackingStartRequest) -> dict[str, str]:
     tracking_job_id = str(uuid4())
-    redis_client.setex(
-        f"tracking:{tracking_job_id}",
-        3600,
-        json.dumps({"done": False, "overlays": []}),
-    )
     use_worker = os.getenv("USE_WORKER_QUEUE", "false").lower() == "true"
-    segmentation_prompt = _build_segmentation_prompt(payload.question, payload.annotations)
+    segmentation_prompt = payload.segmentation_prompt or _build_segmentation_prompt(payload.question, payload.annotations)
+    job_payload = {**payload.model_dump(), "tracking_job_id": tracking_job_id, "segmentation_prompt": segmentation_prompt}
     if use_worker:
-        tracking_queue.enqueue(
-            "workers.tasks.run_tracking_job",
-            {**payload.model_dump(), "tracking_job_id": tracking_job_id, "segmentation_prompt": segmentation_prompt},
+        state_client.setex(
+            f"tracking:{tracking_job_id}",
+            3600,
+            json.dumps({"tracking_job_id": tracking_job_id, "done": False, "progress": 0, "overlays": []}),
         )
+        _enqueue_tracking_job(job_payload)
     else:
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
                 f"{SAM3_SERVICE_URL}/tracking/start",
-                json={**payload.model_dump(), "tracking_job_id": tracking_job_id, "segmentation_prompt": segmentation_prompt},
+                json=job_payload,
             )
         if response.status_code >= 400:
             raise HTTPException(status_code=response.status_code, detail=response.text)
@@ -392,10 +439,27 @@ async def tracking_start(payload: TrackingStartRequest) -> dict[str, str]:
 
 @app.get("/tracking/events/{tracking_job_id}")
 async def tracking_events(tracking_job_id: str) -> StreamingResponse:
+    use_worker = os.getenv("USE_WORKER_QUEUE", "false").lower() == "true"
+    if not use_worker:
+        async def proxy_stream() -> Any:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream(
+                    "GET",
+                    f"{SAM3_SERVICE_URL}/tracking/events/{tracking_job_id}",
+                ) as response:
+                    if response.status_code >= 400:
+                        text = await response.aread()
+                        yield f"event: error\ndata: {text.decode()}\n\n"
+                        return
+                    async for chunk in response.aiter_text():
+                        yield chunk
+
+        return StreamingResponse(proxy_stream(), media_type="text/event-stream")
+
     async def stream() -> Any:
         last_payload = ""
         for _ in range(120):
-            payload = redis_client.get(f"tracking:{tracking_job_id}")
+            payload = state_client.get(f"tracking:{tracking_job_id}")
             if payload and payload != last_payload:
                 yield f"data: {payload}\n\n"
                 last_payload = payload
@@ -409,7 +473,7 @@ async def tracking_events(tracking_job_id: str) -> StreamingResponse:
 
 
 def _load_conversation(session_id: str) -> list[dict[str, str]]:
-    raw = redis_client.get(f"conversation:{session_id}")
+    raw = state_client.get(f"conversation:{session_id}")
     if not raw:
         return []
     return json.loads(raw)
@@ -418,4 +482,4 @@ def _load_conversation(session_id: str) -> list[dict[str, str]]:
 def _append_conversation(session_id: str, question: str, answer: str) -> None:
     current = _load_conversation(session_id)
     updated = append_rolling_conversation(current, question, answer, max_messages=12)
-    redis_client.setex(f"conversation:{session_id}", 3600, json.dumps(updated))
+    state_client.setex(f"conversation:{session_id}", 3600, json.dumps(updated))

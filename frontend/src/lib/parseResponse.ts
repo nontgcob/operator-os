@@ -3,6 +3,8 @@ import type { Annotation } from "@/lib/types";
 interface ParsedModelResponse {
   answer: string;
   annotations: Annotation[];
+  trackingPrompt: string;
+  trackingAnnotations: Annotation[];
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -93,16 +95,30 @@ function parseAnnotationArray(value: unknown): Annotation[] {
 
 function responseFromJson(value: unknown, fallback: string): ParsedModelResponse | null {
   if (!value || typeof value !== "object") return null;
-  const data = value as { answer?: unknown; annotations?: unknown };
-  if (data.answer === undefined && data.annotations === undefined) return null;
+  const data = value as {
+    answer?: unknown;
+    annotations?: unknown;
+    tracking_prompt?: unknown;
+    tracking_annotations?: unknown;
+  };
+  if (
+    data.answer === undefined &&
+    data.annotations === undefined &&
+    data.tracking_prompt === undefined &&
+    data.tracking_annotations === undefined
+  ) {
+    return null;
+  }
   return {
     answer: typeof data.answer === "string" ? data.answer : fallback,
     annotations: parseAnnotationArray(data.annotations),
+    trackingPrompt: typeof data.tracking_prompt === "string" ? data.tracking_prompt : "",
+    trackingAnnotations: parseAnnotationArray(data.tracking_annotations),
   };
 }
 
 export function parseModelResponse(raw: string): ParsedModelResponse {
-  if (!raw) return { answer: "", annotations: [] };
+  if (!raw) return { answer: "", annotations: [], trackingPrompt: "", trackingAnnotations: [] };
 
   const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
   if (fenceMatch) {
@@ -160,5 +176,5 @@ export function parseModelResponse(raw: string): ParsedModelResponse {
     // Non-JSON fallback.
   }
 
-  return { answer: raw, annotations: [] };
+  return { answer: raw, annotations: [], trackingPrompt: "", trackingAnnotations: [] };
 }

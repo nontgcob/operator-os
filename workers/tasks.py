@@ -5,14 +5,27 @@ import os
 from typing import Any
 
 import httpx
-from redis import Redis
 
-redis_client = Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+try:
+    from redis import Redis
+except ImportError:
+    Redis = None  # type: ignore[assignment]
+
+
+def _build_redis_client() -> Any:
+    if Redis is None:
+        return None
+    return Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+
+
+redis_client = _build_redis_client()
 SAM3_SERVICE_URL = os.getenv("SAM3_SERVICE_URL", "http://localhost:8003")
 TRACKING_TTL_SECONDS = 3600
 
 
 def _store_tracking_update(tracking_job_id: str, payload: dict[str, Any]) -> None:
+    if redis_client is None:
+        return
     redis_client.setex(
         f"tracking:{tracking_job_id}",
         TRACKING_TTL_SECONDS,

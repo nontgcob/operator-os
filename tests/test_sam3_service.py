@@ -52,7 +52,7 @@ def _tracking_request() -> dict[str, Any]:
 def test_tracking_start_writes_unavailable_backend_error() -> None:
     module = _load_sam3_main()
     fake_redis = FakeRedis()
-    module.redis_client = fake_redis
+    module.state_client = fake_redis
     module._tracking_backend = tracking_backend.UnavailableTrackingBackend(
         backend="sam3",
         code="sam3_dependency_missing",

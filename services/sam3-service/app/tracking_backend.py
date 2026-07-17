@@ -9,6 +9,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Protocol
 
+try:
+    from services.common.env import load_env_file
+except ImportError:
+    load_env_file = None
+
+if load_env_file:
+    load_env_file()
+
 TRUE_VALUES = {"1", "true", "yes", "on"}
 DEFAULT_OVERLAY_COLOR = "#67A552"
 
@@ -49,7 +57,7 @@ class TrackingBackendConfig:
 
     @classmethod
     def from_env(cls) -> "TrackingBackendConfig":
-        checkpoint = os.getenv("SAM3_CHECKPOINT_PATH")
+        checkpoint = os.getenv("SAM3_CHECKPOINT_PATH", "./models/sam3.pt")
         return cls(
             backend=os.getenv("SAM3_TRACKING_BACKEND", "sam3").strip().lower(),
             allow_simulation_fallback=_env_flag("SAM3_ALLOW_SIMULATION_FALLBACK"),

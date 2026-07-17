@@ -9,6 +9,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 try:
+    from services.common.env import load_env_file
+except ImportError:
+    load_env_file = None
+
+if load_env_file:
+    load_env_file()
+
+try:
     from .annotations import normalize_annotations
     from .model_families import DEFAULT_MODEL, model_family_for, model_supports_reasoning
     from .parse_response import DONE_SENTINEL, parse_openrouter_sse_line

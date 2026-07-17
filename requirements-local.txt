@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+httpx
+python-multipart
+pydantic
+pypdf
+python-docx
+yt-dlp[default,curl-cffi]
+openai-whisper

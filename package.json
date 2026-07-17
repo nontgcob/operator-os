@@ -1,0 +1,14 @@
+{
+  "name": "operatoros",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "setup": "npm install && npm --prefix frontend install && python3 -m venv .venv && .venv/bin/python -m pip install --upgrade pip && .venv/bin/python -m pip install -r requirements-local.txt",
+    "setup:sam3": ".venv/bin/python -m pip install -r services/sam3-service/requirements.txt",
+    "dev": "concurrently -n frontend,orchestrator,ragvlm,video,sam3 -c blue,green,magenta,cyan,yellow \"npm --prefix frontend run dev\" \"env PYTHONPATH=.:services/orchestrator .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload\" \"env PYTHONPATH=.:services/ragvlm-service .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload\" \"env PYTHONPATH=.:services/video-service .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload\" \"env PYTHONPATH=.:services/sam3-service .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload\"",
+    "test": ".venv/bin/python -m pytest tests"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

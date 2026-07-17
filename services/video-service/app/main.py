@@ -12,6 +12,14 @@ from uuid import uuid4
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
+try:
+    from services.common.env import load_env_file
+except ImportError:
+    load_env_file = None
+
+if load_env_file:
+    load_env_file()
+
 app = FastAPI(title="OperatorOS Video Service", version="0.1.0")
 
 BASE_DIR = Path(os.getenv("VIDEO_DATA_DIR", "data/video"))

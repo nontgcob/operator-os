@@ -13,10 +13,14 @@ OperatorOS is a video-first multimodal orchestration platform built around a reu
 
 ## Quick start
 
-1. Copy `.env.example` to `.env` and fill required values.
-2. Start infrastructure and services with Docker Compose:
-   - `docker compose up --build`
-3. Open `http://localhost:3000`.
+1. Copy `.env.local.example` to `.env` and fill required values.
+2. Install local dependencies:
+   - `npm run setup`
+3. Start all local services without Docker:
+   - `npm run dev`
+4. Open `http://localhost:3000`.
+
+Docker Compose is still available for containerized runs with `docker compose up --build`, but it is no longer the default development path.
 
 ## Demo configuration
 
@@ -26,8 +30,9 @@ OperatorOS is a video-first multimodal orchestration platform built around a reu
 - YouTube URL ingestion is handled by `video-service` with `yt-dlp`, `ffmpeg`, yt-dlp EJS support, Deno, and the `curl-cffi` extra for optional yt-dlp-supported request impersonation. `YTDLP_JS_RUNTIME=deno:/usr/local/bin/deno` enables the installed Deno runtime explicitly, and `YTDLP_REMOTE_COMPONENTS=ejs:github` allows yt-dlp to fetch current EJS challenge solver scripts when the packaged components are stale. Check `http://localhost:8002/diagnostics/ytdlp` after rebuild to confirm runtime availability.
 - Cookie-free public-video tuning is available through `YTDLP_EXTRACTOR_ARGS`, `YTDLP_YOUTUBE_PLAYER_CLIENTS` (for example `mweb,default`), `YTDLP_YOUTUBE_FETCH_PO_TOKEN` (`auto`, `always`, or `never`), and `YTDLP_PO_TOKEN_PROVIDER_ARGS` (for example `youtubepot-bgutilhttp:base_url=http://po-token-provider:4416`). PO Token Provider plugins are not bundled; install a maintained provider in a custom image or environment, then pass its provider-specific args with these env vars.
 - Additional yt-dlp network tuning is available through `YTDLP_USER_AGENT`, `YTDLP_FORCE_IPV4`, `YTDLP_IMPERSONATE`, `YTDLP_RETRIES`, `YTDLP_FRAGMENT_RETRIES`, `YTDLP_EXTRACTOR_RETRIES`, and `YTDLP_SOCKET_TIMEOUT`. Leave `YTDLP_IMPERSONATE` blank unless you need yt-dlp's normal `--impersonate` support for public-video extraction.
-- If YouTube asks to confirm you are not a bot, requires login, or returns HTTP 429/rate-limit errors, there is no reliable universal cookie-free fix. For login/account-gated cases, create `./data/ytdlp/`, export browser cookies to `./data/ytdlp/cookies.txt`, set `YTDLP_COOKIES_FILE=/app/data/ytdlp/cookies.txt`, then run `docker compose up --build video-service orchestrator frontend`. For rate limiting or poor IP reputation, retry later or use a different network. Do not commit exported cookies.
-- Real SAM3 tracking uses Ultralytics SAM3 predictors with a local `sam3.pt` checkpoint. Put the weight at `models/sam3.pt` or set `SAM3_CHECKPOINT_PATH` to the mounted path.
+- If YouTube asks to confirm you are not a bot, requires login, or returns HTTP 429/rate-limit errors, there is no reliable universal cookie-free fix. For login/account-gated cases, create `./data/ytdlp/`, export browser cookies to `./data/ytdlp/cookies.txt`, set `YTDLP_COOKIES_FILE=./data/ytdlp/cookies.txt`, then restart the local video service. For rate limiting or poor IP reputation, retry later or use a different network. Do not commit exported cookies.
+- Real SAM3 tracking uses Ultralytics SAM3 predictors with a local `sam3.pt` checkpoint. Put the weight at `models/sam3.pt` or set `SAM3_CHECKPOINT_PATH` to the local path.
+- Install real SAM3/GPU dependencies with `npm run setup:sam3` on the RTX 4090 machine.
 - Keep `SAM3_ALLOW_SIMULATION_FALLBACK=false` for real demos. Set it to `true` only for development when explicit simulated overlays are acceptable.
 - `SAM3_MAX_PROPAGATION_FRAMES` controls how many overlay frames are generated, and `SAM3_MAX_POLYGON_POINTS` caps mask polygon size before streaming overlays back to the frontend.
 - Leave `USE_WORKER_QUEUE=false` for direct service calls, or set it to `true` to route tracking starts through the included RQ worker.

@@ -13,7 +13,15 @@ from uuid import uuid4
 
 import httpx
 
-DOCUMENT_DIR = Path(os.getenv("RAGVLM_DOCUMENT_DIR", "/app/data/ragvlm/documents"))
+try:
+    from services.common.env import load_env_file
+except ImportError:
+    load_env_file = None
+
+if load_env_file:
+    load_env_file()
+
+DOCUMENT_DIR = Path(os.getenv("RAGVLM_DOCUMENT_DIR", "data/ragvlm/documents"))
 INDEX_FILENAME = "index.json"
 FILES_DIRNAME = "files"
 EMBEDDING_MODEL = os.getenv("RAGVLM_EMBEDDING_MODEL", "openai/text-embedding-3-small")

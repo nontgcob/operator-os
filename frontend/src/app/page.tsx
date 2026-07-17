@@ -267,6 +267,9 @@ export default function Home() {
   const [trackingOverlays, setTrackingOverlays] = useState<TrackingOverlay[]>([]);
   const [trackingEnabled, setTrackingEnabled] = useState(false);
   const [showTrackingOverlays, setShowTrackingOverlays] = useState(false);
+  const [activeTrackingJobId, setActiveTrackingJobId] = useState("");
+  const [trackingStatus, setTrackingStatus] = useState("");
+  const [trackingError, setTrackingError] = useState("");
   const [sendAnnotatedSnapshot, setSendAnnotatedSnapshot] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [activeTool, setActiveTool] = useState<AnnotationType>("cursor");
@@ -276,6 +279,7 @@ export default function Home() {
   const [textAnnotation, setTextAnnotation] = useState("");
   const [showTranscript, setShowTranscript] = useState(false);
   const localFileInputRef = useRef<HTMLInputElement | null>(null);
+  const trackingEventSourceRef = useRef<EventSource | null>(null);
 
   const currentOverlay = useMemo(() => {
     return trackingOverlays.filter(
@@ -283,7 +287,16 @@ export default function Home() {
     );
   }, [trackingOverlays, timestamp]);
 
+  function closeTrackingEventSource() {
+    const source = trackingEventSourceRef.current as EventSource | null;
+    if (source) {
+      source.close();
+    }
+    trackingEventSourceRef.current = null;
+  }
+
   function resetVideoContext() {
+    closeTrackingEventSource();
     setVideoUrl("");
     setVideoId("");
     setVideoTitle("");
@@ -297,6 +310,9 @@ export default function Home() {
     setModelAnnotations([]);
     setAnnotationUndoStack([]);
     setTrackingOverlays([]);
+    setActiveTrackingJobId("");
+    setTrackingStatus("");
+    setTrackingError("");
     setChatMessages([]);
   }
 
@@ -625,22 +641,16 @@ export default function Home() {
       { id: assistantMessageId, role: "assistant", content: "Thinking...", model: selectedModel },
     ]);
     setQuestion("");
+    closeTrackingEventSource();
+    setTrackingOverlays([]);
+    setActiveTrackingJobId("");
+    setTrackingStatus("");
+    setTrackingError("");
 
     try {
       const frameData = await captureFrame();
       const annotatedFrameData = includeAnnotatedSnapshot ? await captureAnnotatedFrame() : undefined;
       const transcript = await loadTranscriptWindow(videoId, timestamp);
-      const trackingPromise =
-        trackingEnabled
-          ? startTracking({
-              session_id: sessionId,
-              video_id: videoId,
-              timestamp,
-              frame_data_url: frameData,
-              question: trimmedQuestion,
-              annotations,
-            }).catch(() => null)
-          : Promise.resolve(null);
 
       const response = await askQuestion({
         session_id: sessionId,
@@ -744,24 +754,75 @@ export default function Home() {
         setModelAnnotations([]);
       }
       if (trackingEnabled) {
+        closeTrackingEventSource();
+        setTrackingOverlays([]);
+        setActiveTrackingJobId("");
+        setTrackingError("");
+        setTrackingStatus("Preparing SAM3 target from VLM response...");
+
+        const trackingAnnotations = parsed.trackingAnnotations.length
+          ? parsed.trackingAnnotations
+          : parsed.annotations;
+        if (!trackingAnnotations.length) {
+          setTrackingStatus("");
+          setTrackingError("No trackable target returned by VLM.");
+          return;
+        }
+
         try {
-          const tracking = await trackingPromise;
-          if (!tracking) return;
+          const tracking = await startTracking({
+            session_id: sessionId,
+            video_id: videoId,
+            timestamp,
+            frame_data_url: frameData,
+            question: trimmedQuestion,
+            segmentation_prompt:
+              parsed.trackingPrompt || "Track the object highlighted by the provided annotation.",
+            annotations: trackingAnnotations,
+          });
+          const trackingJobId = tracking.tracking_job_id;
+          setActiveTrackingJobId(trackingJobId);
+          setTrackingStatus(`Tracking job started: ${trackingJobId}`);
           const events = new EventSource(
-            `${process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ?? "http://localhost:8000"}/tracking/events/${tracking.tracking_job_id}`
+            `${process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ?? "http://localhost:8000"}/tracking/events/${trackingJobId}`
           );
+          trackingEventSourceRef.current = events;
           events.onmessage = (e) => {
             const payload = JSON.parse(e.data) as {
+              tracking_job_id?: string;
               done: boolean;
+              progress?: number;
+              backend?: string;
               overlays: TrackingOverlay[];
+              error?: { message?: string };
             };
+            if (payload.tracking_job_id && payload.tracking_job_id !== trackingJobId) return;
+            if (payload.error?.message) {
+              setTrackingError(payload.error.message);
+            }
+            setTrackingStatus(
+              `${payload.backend ?? "SAM3"} tracking ${payload.done ? "complete" : "running"}${
+                payload.progress !== undefined ? ` (${payload.progress}%)` : ""
+              }`
+            );
             setTrackingOverlays(payload.overlays);
             if (payload.done) {
               events.close();
+              if (trackingEventSourceRef.current === events) {
+                trackingEventSourceRef.current = null;
+              }
+            }
+          };
+          events.onerror = () => {
+            setTrackingError("Tracking event stream failed.");
+            events.close();
+            if (trackingEventSourceRef.current === events) {
+              trackingEventSourceRef.current = null;
             }
           };
         } catch {
-          // Tracking is secondary; the answer should remain visible if tracking fails.
+          setTrackingError("Tracking failed to start.");
+          setTrackingStatus("");
         }
       }
     } catch (error) {
@@ -1009,6 +1070,19 @@ export default function Home() {
               Frame at {formatTimestamp(timestamp)}. Default payload sends the original frame plus
               annotation JSON; the annotated snapshot is optional.
             </p>
+            {activeTrackingJobId && (
+              <p className="op-help-text">Active tracking job: {activeTrackingJobId}</p>
+            )}
+            {trackingStatus && (
+              <p role="status" className="op-status-text">
+                {trackingStatus}
+              </p>
+            )}
+            {trackingError && (
+              <p role="alert" className="op-error-text">
+                {trackingError}
+              </p>
+            )}
             {showTranscript && (
               <div className="op-transcript-panel">
                 {transcriptWindow?.source && (
