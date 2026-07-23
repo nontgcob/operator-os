@@ -37,6 +37,10 @@ function v(value = 0) {
   return (value / 1000) * 100;
 }
 
+function trackingValue(value = 0) {
+  return Math.min(100, Math.max(0, value));
+}
+
 function pathFromPoints(points: Point[]) {
   return points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
 }
@@ -582,12 +586,13 @@ export function AnnotationOverlay({
       {trackingOverlays.map((overlay, idx) => (
         <polygon
           key={`tracking-${overlay.track_id}-${overlay.timestamp}-${idx}`}
-          points={overlay.points.map((p) => `${v(p.x)},${v(p.y)}`).join(" ")}
-          fill="none"
+          points={overlay.points.map((p) => `${trackingValue(p.x)},${trackingValue(p.y)}`).join(" ")}
+          fill={overlay.color}
+          fillOpacity={0.38}
           stroke={overlay.color}
-          strokeWidth={0.7}
-          strokeDasharray="2 1.5"
-          opacity={0.85}
+          strokeWidth={0.35}
+          strokeLinejoin="round"
+          opacity={0.95}
           style={{ pointerEvents: "none" }}
         />
       ))}

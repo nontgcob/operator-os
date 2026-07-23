@@ -4,6 +4,7 @@ import asyncio
 import importlib.util
 import os
 import re
+import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,12 +49,14 @@ class TrackingBackendConfig:
     checkpoint_path: Path | None = None
     allow_hf_download: bool = False
     video_root: Path = Path("data/video")
+    rendered_video_root: Path = Path("data/tracking")
     device: str | None = None
-    max_frames: int = 20
+    max_frames: int = 0
     frame_interval_seconds: float = 1.0
     simulation_steps: int = 10
     simulation_delay_seconds: float = 0.35
-    max_polygon_points: int = 160
+    max_polygon_points: int = 512
+    image_size: int = 1024
 
     @classmethod
     def from_env(cls) -> "TrackingBackendConfig":
@@ -64,12 +67,14 @@ class TrackingBackendConfig:
             checkpoint_path=Path(checkpoint).expanduser() if checkpoint else None,
             allow_hf_download=_env_flag("SAM3_ALLOW_HF_DOWNLOAD"),
             video_root=Path(os.getenv("SAM3_VIDEO_ROOT", "data/video")).expanduser(),
+            rendered_video_root=Path(os.getenv("SAM3_RENDERED_VIDEO_ROOT", "data/tracking")).expanduser(),
             device=os.getenv("SAM3_DEVICE") or None,
-            max_frames=max(1, _env_int("SAM3_MAX_PROPAGATION_FRAMES", 20)),
+            max_frames=max(0, _env_int("SAM3_MAX_PROPAGATION_FRAMES", 0)),
             frame_interval_seconds=max(0.001, _env_float("SAM3_FRAME_INTERVAL_SECONDS", 1.0)),
             simulation_steps=max(1, _env_int("SAM3_SIMULATION_STEPS", 10)),
             simulation_delay_seconds=max(0.0, _env_float("SAM3_SIMULATION_DELAY_SECONDS", 0.35)),
-            max_polygon_points=max(8, _env_int("SAM3_MAX_POLYGON_POINTS", 160)),
+            max_polygon_points=max(8, _env_int("SAM3_MAX_POLYGON_POINTS", 512)),
+            image_size=max(320, _env_int("SAM3_IMAGE_SIZE", 1024)),
         )
 
 
@@ -202,16 +207,21 @@ class Sam3TrackingBackend:
                 return self._predictors[predictor_type]
 
             def load_model() -> Any:
+                import torch
                 from ultralytics.models.sam import SAM3VideoPredictor, SAM3VideoSemanticPredictor
 
                 model_path = str(self.config.checkpoint_path) if self.config.checkpoint_path else "sam3.pt"
                 os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
                 overrides: dict[str, Any] = {
-                    "conf": 0.25,
+                    "conf": 0.50,
+                    "show_conf": True,
                     "task": "segment",
                     "mode": "predict",
                     "model": model_path,
+                    "imgsz": self.config.image_size,
                     "compile": False,
+                    "half": bool(torch.cuda.is_available() and self.config.device != "cpu"),
+                    "save": False,
                     "verbose": False,
                 }
                 if self.config.device:
@@ -277,10 +287,13 @@ class Sam3TrackingBackend:
         job: TrackingJob,
         video_path: Path,
     ) -> Iterator[dict[str, Any]]:
-        clip_path, frame_width, frame_height = self._clip_from_timestamp(video_path, job)
+        clip_path, frame_width, frame_height, clip_fps, clip_frame_count = self._clip_from_timestamp(video_path, job)
         boxes = annotation_boxes_xywh(job.annotations)
         prompt = job.segmentation_prompt or job.question
-        overlays: list[dict[str, Any]] = []
+        rendered_path = self.config.rendered_video_root / f"{job.tracking_job_id}.mp4"
+        working_rendered_path = rendered_path.with_suffix(".working.mp4")
+        rendered_path.parent.mkdir(parents=True, exist_ok=True)
+        rendered_writer: Any = None
 
         if boxes:
             pixel_boxes = [_xywh_unit_to_xyxy_pixels(box, frame_width, frame_height) for box in boxes]
@@ -288,33 +301,50 @@ class Sam3TrackingBackend:
         else:
             results = predictor(source=str(clip_path), text=[prompt], stream=True)
 
-        total = self.config.max_frames
-        for index, result in enumerate(results, start=1):
-            timestamp = job.timestamp + ((index - 1) * self.config.frame_interval_seconds)
-            overlays.extend(
-                ultralytics_result_to_overlays(
-                    result,
-                    timestamp=timestamp,
-                    max_polygon_points=self.config.max_polygon_points,
-                )
-            )
-            yield {
-                "done": False,
-                "progress": min(99, round((index / total) * 100)),
-                "overlays": overlays,
-                "backend": self.name,
-            }
-            if index >= total:
-                break
+        total = max(1, clip_frame_count)
+        try:
+            for index, result in enumerate(results, start=1):
+                timestamp = job.timestamp + ((index - 1) / clip_fps)
+                rendered_frame = _render_result_mask(result)
+                if rendered_frame is not None:
+                    if rendered_writer is None:
+                        import cv2
+
+                        frame_height, frame_width = rendered_frame.shape[:2]
+                        rendered_writer = cv2.VideoWriter(
+                            str(working_rendered_path),
+                            cv2.VideoWriter_fourcc(*"mp4v"),
+                            clip_fps,
+                            (frame_width, frame_height),
+                        )
+                        if not rendered_writer.isOpened():
+                            raise RuntimeError(f"Unable to create rendered SAM3 video: {working_rendered_path}")
+                    rendered_writer.write(rendered_frame)
+                yield {
+                    "done": False,
+                    "progress": min(99, round((index / total) * 100)),
+                    "overlays": [],
+                    "backend": self.name,
+                }
+                if self.config.max_frames > 0 and index >= self.config.max_frames:
+                    break
+        finally:
+            if rendered_writer is not None:
+                rendered_writer.release()
+
+        if rendered_writer is None or not working_rendered_path.exists():
+            raise RuntimeError("SAM3 completed without producing a rendered tracking video.")
+        _transcode_rendered_video(working_rendered_path, rendered_path)
 
         yield {
             "done": True,
             "progress": 100,
-            "overlays": overlays,
+            "overlays": [],
             "backend": self.name,
+            "rendered_video_path": str(rendered_path),
         }
 
-    def _clip_from_timestamp(self, video_path: Path, job: TrackingJob) -> tuple[Path, int, int]:
+    def _clip_from_timestamp(self, video_path: Path, job: TrackingJob) -> tuple[Path, int, int, float, int]:
         import cv2
 
         output_path = Path(tempfile.gettempdir()) / f"operatoros-sam3-{job.tracking_job_id}.mp4"
@@ -326,11 +356,10 @@ class Sam3TrackingBackend:
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
         start_frame = max(0, round(job.timestamp * fps))
-        frame_step = max(1, round(self.config.frame_interval_seconds * fps))
         writer = cv2.VideoWriter(
             str(output_path),
             cv2.VideoWriter_fourcc(*"mp4v"),
-            1.0 / self.config.frame_interval_seconds,
+            fps,
             (width, height),
         )
         if not writer.isOpened():
@@ -340,15 +369,12 @@ class Sam3TrackingBackend:
         written = 0
         try:
             capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-            while written < self.config.max_frames:
+            while self.config.max_frames == 0 or written < self.config.max_frames:
                 ok, frame = capture.read()
                 if not ok:
                     break
                 writer.write(frame)
                 written += 1
-                for _ in range(frame_step - 1):
-                    if not capture.grab():
-                        break
         finally:
             writer.release()
             capture.release()
@@ -356,14 +382,14 @@ class Sam3TrackingBackend:
         if written == 0:
             return self._clip_from_extracted_frames(video_path, job, output_path)
 
-        return output_path, width, height
+        return output_path, width, height, fps, written
 
     def _clip_from_extracted_frames(
         self,
         video_path: Path,
         job: TrackingJob,
         output_path: Path,
-    ) -> tuple[Path, int, int]:
+    ) -> tuple[Path, int, int, float, int]:
         import cv2
 
         frame_dir = video_path.parent / "frames"
@@ -374,7 +400,11 @@ class Sam3TrackingBackend:
             )
 
         start_index = max(0, round(job.timestamp / self.config.frame_interval_seconds))
-        selected = frame_paths[start_index : start_index + self.config.max_frames]
+        selected = (
+            frame_paths[start_index : start_index + self.config.max_frames]
+            if self.config.max_frames > 0
+            else frame_paths[start_index:]
+        )
         if not selected:
             raise RuntimeError("No extracted frames are available at the requested SAM3 timestamp.")
 
@@ -401,7 +431,7 @@ class Sam3TrackingBackend:
         finally:
             writer.release()
 
-        return output_path, width, height
+        return output_path, width, height, 1.0 / self.config.frame_interval_seconds, len(selected)
 
 
 def build_tracking_backend(config: TrackingBackendConfig | None = None) -> TrackingBackend:
@@ -495,30 +525,31 @@ def ultralytics_result_to_overlays(
         return []
 
     overlays: list[dict[str, Any]] = []
+    boxes = getattr(result, "boxes", None)
+    confs = _to_list(getattr(boxes, "conf", None))
+    ids = _to_list(getattr(boxes, "id", None))
     masks = getattr(result, "masks", None)
-    polygons = getattr(masks, "xy", None)
-    if isinstance(polygons, list):
-        for index, polygon in enumerate(polygons):
-            points = _polygon_to_percent_points(polygon, width, height)
-            points = _downsample_points(points, max_polygon_points)
-            if len(points) < 3:
-                continue
-            overlays.append(
-                {
-                    "track_id": f"sam3-mask-{index + 1}",
-                    "label": f"SAM3 Mask {index + 1}",
-                    "color": DEFAULT_OVERLAY_COLOR,
-                    "timestamp": timestamp,
-                    "points": points,
-                }
-            )
+    mask_data = _to_numpy(getattr(masks, "data", None))
+    if mask_data is not None and getattr(mask_data, "ndim", 0) == 3:
+        for mask_index, mask in enumerate(mask_data):
+            obj_id = ids[mask_index] if mask_index < len(ids) else mask_index + 1
+            score = confs[mask_index] if mask_index < len(confs) else None
+            for contour_index, points in enumerate(
+                _mask_contours_to_percent_points(mask, int(width), int(height), max_polygon_points)
+            ):
+                overlays.append(
+                    {
+                        "track_id": f"sam3-{obj_id}-contour-{contour_index + 1}",
+                        "label": _overlay_label(obj_id, score),
+                        "color": DEFAULT_OVERLAY_COLOR,
+                        "timestamp": timestamp,
+                        "points": points,
+                    }
+                )
         if overlays:
             return overlays
 
-    boxes = getattr(result, "boxes", None)
     xyxy = _to_list(getattr(boxes, "xyxy", None))
-    confs = _to_list(getattr(boxes, "conf", None))
-    ids = _to_list(getattr(boxes, "id", None))
     for index, box in enumerate(xyxy):
         if not isinstance(box, list) or len(box) < 4:
             continue
@@ -534,6 +565,95 @@ def ultralytics_result_to_overlays(
             }
         )
     return overlays
+
+
+def _mask_contours_to_percent_points(
+    mask: Any,
+    width: int,
+    height: int,
+    max_points: int,
+) -> list[list[dict[str, float]]]:
+    import cv2
+    import numpy as np
+
+    binary = (np.asarray(mask) > 0.5).astype(np.uint8)
+    if binary.shape[:2] != (height, width):
+        binary = cv2.resize(binary, (width, height), interpolation=cv2.INTER_NEAREST)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    minimum_area = max(4.0, width * height * 0.00005)
+    contours = [contour for contour in contours if cv2.contourArea(contour) >= minimum_area]
+    contours.sort(key=cv2.contourArea, reverse=True)
+
+    result: list[list[dict[str, float]]] = []
+    for contour in contours:
+        raw_points = contour.reshape(-1, 2).tolist()
+        points = [
+            {
+                "x": _clamp_percent((float(x) / width) * 100),
+                "y": _clamp_percent((float(y) / height) * 100),
+            }
+            for x, y in raw_points
+        ]
+        points = _downsample_points(points, max_points)
+        if len(points) >= 3:
+            result.append(points)
+    return result
+
+
+def _render_result_mask(result: Any) -> Any:
+    import cv2
+    import numpy as np
+
+    frame = getattr(result, "orig_img", None)
+    if frame is None:
+        return None
+    annotated = np.asarray(frame).copy()
+    masks = getattr(result, "masks", None)
+    mask_data = _to_numpy(getattr(masks, "data", None))
+    if mask_data is None or getattr(mask_data, "ndim", 0) != 3:
+        return annotated
+
+    color = np.asarray((82, 165, 103), dtype=np.float32)
+    for mask in mask_data:
+        binary = np.asarray(mask) > 0.5
+        if binary.shape[:2] != annotated.shape[:2]:
+            binary = cv2.resize(
+                binary.astype(np.uint8),
+                (annotated.shape[1], annotated.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+        annotated[binary] = (0.55 * annotated[binary] + 0.45 * color).astype(np.uint8)
+    return annotated
+
+
+def _transcode_rendered_video(input_path: Path, output_path: Path) -> None:
+    ffmpeg = os.getenv("FFMPEG_BINARY", "ffmpeg")
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(input_path),
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0 or not output_path.is_file():
+        message = completed.stderr.strip() or "FFmpeg did not create an output file."
+        raise RuntimeError(f"Unable to encode browser-compatible SAM3 video: {message}")
+    input_path.unlink(missing_ok=True)
 
 
 def _downsample_points(
@@ -755,6 +875,23 @@ def _to_list(value: Any) -> list[Any]:
     if isinstance(value, tuple):
         return list(value)
     return []
+
+
+def _to_numpy(value: Any) -> Any:
+    if value is None:
+        return None
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "cpu"):
+        value = value.cpu()
+    if hasattr(value, "numpy"):
+        return value.numpy()
+    try:
+        import numpy as np
+
+        return np.asarray(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _number(value: Any) -> float | None:

@@ -6,4 +6,5 @@ ultralytics
 timm
 huggingface_hub
 safetensors
-git+https://github.com/openai/CLIP.git
+# Ultralytics SAM3 requires its callable SimpleTokenizer implementation.
+git+https://github.com/ultralytics/CLIP.git

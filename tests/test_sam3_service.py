@@ -6,8 +6,10 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -130,3 +132,29 @@ def test_sam3_outputs_are_converted_to_frontend_overlay_shape() -> None:
     assert overlay["points"][1] == {"x": pytest.approx(40.0), "y": 20.0}
     assert overlay["points"][2] == {"x": pytest.approx(40.0), "y": pytest.approx(60.0)}
     assert overlay["points"][3] == {"x": 10.0, "y": pytest.approx(60.0)}
+
+
+def test_disconnected_mask_regions_become_separate_polygons() -> None:
+    mask = np.zeros((20, 20), dtype=np.float32)
+    mask[2:8, 2:8] = 1
+    mask[12:18, 12:18] = 1
+    result = SimpleNamespace(
+        orig_shape=(20, 20),
+        masks=SimpleNamespace(data=np.asarray([mask])),
+        boxes=SimpleNamespace(conf=np.asarray([0.9]), id=np.asarray([4]), xyxy=None),
+    )
+
+    overlays = tracking_backend.ultralytics_result_to_overlays(result, timestamp=1.25)
+
+    assert len(overlays) == 2
+    assert {overlay["track_id"] for overlay in overlays} == {
+        "sam3-4-contour-1",
+        "sam3-4-contour-2",
+    }
+    assert all(len(overlay["points"]) >= 3 for overlay in overlays)
+    assert all(
+        0 <= point[axis] <= 100
+        for overlay in overlays
+        for point in overlay["points"]
+        for axis in ("x", "y")
+    )

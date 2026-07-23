@@ -5,6 +5,7 @@ import type { FormEvent } from "react";
 import { AnnotationControls } from "@/components/AnnotationControls";
 import { AnnotationOverlay } from "@/components/AnnotationOverlay";
 import { parseModelResponse } from "@/lib/parseResponse";
+import { explicitlyRequestsTracking } from "@/lib/trackingIntent";
 import {
   askQuestion,
   getMediaSourceUrl,
@@ -260,6 +261,7 @@ export default function Home() {
   const [videoAspectRatio, setVideoAspectRatio] = useState(1);
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [timestamp, setTimestamp] = useState(0);
+  const [videoTimeOffset, setVideoTimeOffset] = useState(0);
   const [transcriptWindow, setTranscriptWindow] = useState<TranscriptWindowResponse | null>(null);
   const [transcriptError, setTranscriptError] = useState("");
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
@@ -280,11 +282,17 @@ export default function Home() {
   const [showTranscript, setShowTranscript] = useState(false);
   const localFileInputRef = useRef<HTMLInputElement | null>(null);
   const trackingEventSourceRef = useRef<EventSource | null>(null);
+  const resumeAfterTrackingRef = useRef(false);
 
   const currentOverlay = useMemo(() => {
-    return trackingOverlays.filter(
-      (overlay) => Math.abs(overlay.timestamp - timestamp) < 0.25
-    );
+    if (!trackingOverlays.length) return [];
+    const nearestTimestamp = trackingOverlays.reduce((nearest, overlay) =>
+      Math.abs(overlay.timestamp - timestamp) < Math.abs(nearest - timestamp)
+        ? overlay.timestamp
+        : nearest
+    , trackingOverlays[0].timestamp);
+    if (Math.abs(nearestTimestamp - timestamp) > 0.1) return [];
+    return trackingOverlays.filter((overlay) => Math.abs(overlay.timestamp - nearestTimestamp) < 0.0001);
   }, [trackingOverlays, timestamp]);
 
   function closeTrackingEventSource() {
@@ -304,6 +312,7 @@ export default function Home() {
     setVideoAspectRatio(1);
     setPendingVideoReadyStatus("");
     setTimestamp(0);
+    setVideoTimeOffset(0);
     setTranscriptWindow(null);
     setTranscriptError("");
     setAnnotations([]);
@@ -622,6 +631,7 @@ export default function Home() {
     event.preventDefault();
     const trimmedQuestion = question.trim();
     if (!videoId || !videoMetadataLoaded || !trimmedQuestion) return;
+    const sourceTimestamp = timestamp + videoTimeOffset;
     setLoading(true);
     const attachedDocuments = documents
       .filter((document) => selectedDocumentIds.includes(document.id))
@@ -650,13 +660,13 @@ export default function Home() {
     try {
       const frameData = await captureFrame();
       const annotatedFrameData = includeAnnotatedSnapshot ? await captureAnnotatedFrame() : undefined;
-      const transcript = await loadTranscriptWindow(videoId, timestamp);
+      const transcript = await loadTranscriptWindow(videoId, sourceTimestamp);
 
       const response = await askQuestion({
         session_id: sessionId,
         video_id: videoId,
         video_title: videoTitle || undefined,
-        timestamp,
+        timestamp: sourceTimestamp,
         frame_data_url: frameData,
         annotated_frame_data_url: annotatedFrameData,
         question: trimmedQuestion,
@@ -753,31 +763,44 @@ export default function Home() {
       } else {
         setModelAnnotations([]);
       }
-      if (trackingEnabled) {
+      const explicitTrackingRequest = explicitlyRequestsTracking(trimmedQuestion);
+      const modelSuggestsTracking =
+        Boolean(parsed.trackingPrompt.trim()) || parsed.trackingAnnotations.length > 0;
+      const shouldStartTracking = explicitTrackingRequest || trackingEnabled || modelSuggestsTracking;
+
+      if (shouldStartTracking) {
+        const video = videoRef.current;
+        resumeAfterTrackingRef.current = Boolean(video && !video.paused);
+        video?.pause();
         closeTrackingEventSource();
         setTrackingOverlays([]);
         setActiveTrackingJobId("");
         setTrackingError("");
-        setTrackingStatus("Preparing SAM3 target from VLM response...");
+        setTrackingStatus(
+          explicitTrackingRequest
+            ? "Preparing requested SAM3 tracking..."
+            : "Preparing SAM3 target from VLM response..."
+        );
 
         const trackingAnnotations = parsed.trackingAnnotations.length
           ? parsed.trackingAnnotations
-          : parsed.annotations;
-        if (!trackingAnnotations.length) {
-          setTrackingStatus("");
-          setTrackingError("No trackable target returned by VLM.");
-          return;
+          : trackingEnabled && !explicitTrackingRequest
+            ? parsed.annotations
+            : [];
+
+        if (explicitTrackingRequest) {
+          setShowTrackingOverlays(true);
         }
 
         try {
           const tracking = await startTracking({
             session_id: sessionId,
             video_id: videoId,
-            timestamp,
+            timestamp: sourceTimestamp,
             frame_data_url: frameData,
             question: trimmedQuestion,
             segmentation_prompt:
-              parsed.trackingPrompt || "Track the object highlighted by the provided annotation.",
+              parsed.trackingPrompt.trim() || trimmedQuestion,
             annotations: trackingAnnotations,
           });
           const trackingJobId = tracking.tracking_job_id;
@@ -794,11 +817,13 @@ export default function Home() {
               progress?: number;
               backend?: string;
               overlays: TrackingOverlay[];
+              rendered_video_path?: string;
               error?: { message?: string };
             };
             if (payload.tracking_job_id && payload.tracking_job_id !== trackingJobId) return;
             if (payload.error?.message) {
               setTrackingError(payload.error.message);
+              resumeAfterTrackingRef.current = false;
             }
             setTrackingStatus(
               `${payload.backend ?? "SAM3"} tracking ${payload.done ? "complete" : "running"}${
@@ -807,6 +832,16 @@ export default function Home() {
             );
             setTrackingOverlays(payload.overlays);
             if (payload.done) {
+              if (!payload.error && payload.rendered_video_path) {
+                const baseUrl = process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ?? "http://localhost:8000";
+                setTrackingOverlays([]);
+                setShowTrackingOverlays(false);
+                setVideoTimeOffset(sourceTimestamp);
+                setTimestamp(0);
+                setVideoUrl(`${baseUrl}/tracking/video/${trackingJobId}?v=${Date.now()}`);
+                setTrackingStatus("SAM3 processed video ready. Press play to view tracking.");
+              }
+              resumeAfterTrackingRef.current = false;
               events.close();
               if (trackingEventSourceRef.current === events) {
                 trackingEventSourceRef.current = null;
@@ -815,13 +850,16 @@ export default function Home() {
           };
           events.onerror = () => {
             setTrackingError("Tracking event stream failed.");
+            resumeAfterTrackingRef.current = false;
             events.close();
             if (trackingEventSourceRef.current === events) {
               trackingEventSourceRef.current = null;
             }
           };
-        } catch {
-          setTrackingError("Tracking failed to start.");
+        } catch (error) {
+          resumeAfterTrackingRef.current = false;
+          const message = error instanceof Error ? error.message : "Unknown tracking start error.";
+          setTrackingError(`Tracking failed to start: ${message}`);
           setTrackingStatus("");
         }
       }
@@ -1048,7 +1086,7 @@ export default function Home() {
                 checked={trackingEnabled}
                 onChange={(event) => setTrackingEnabled(event.target.checked)}
               />
-              <span>Enable SAM3 Tracking</span>
+              <span>Automatically use SAM3 Tracking</span>
             </label>
             <label className="op-checkbox-row">
               <input

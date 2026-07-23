@@ -14,12 +14,14 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+.venv-*/
 venv/
 data/
 data/ytdlp/
 **/cookies.txt
 uploads/
 artifacts/
+runs/
 *.log
 models/*
 !models/README.md

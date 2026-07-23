@@ -150,6 +150,25 @@
 
 ### Progress Updates
 
+[2026-07-17 19:30 HKT]
+- Validated real Ultralytics SAM3 inference on an RTX 4090 with `models/sam3.pt`: CUDA 12.6 was available and a three-frame box-prompted smoke job returned one overlay per frame.
+- Replaced the broken Python 3.9 environment with Python 3.12 after PyTorch failed to import `typing.TypeGuard`.
+- Added cross-platform root npm Python/service launchers, a Windows CUDA PyTorch setup command, and `npm run diagnose:sam3`.
+- Expanded SAM3 health diagnostics with the PyTorch version, CUDA build version, and detected GPU name.
+
+### Challenges
+
+[2026-07-17 19:30 HKT]
+- The initial Windows venv used Python 3.9, which was incompatible with the installed PyTorch package.
+- Installing SAM3 requirements from normal PyPI selected `torch 2.13.0+cpu`, so the RTX 4090 was invisible until the CUDA 12.6 wheel was installed from the official PyTorch index.
+- The active `.env` retained Docker-only `/app/data/video` and `/app/models/sam3.pt` paths; real inference succeeded after selecting the repo-relative local paths from `.env.local.example`.
+
+### Solution
+
+[2026-07-17 19:30 HKT]
+- Use Python 3.12 on Windows, run `npm run setup:sam3`, then `npm run setup:sam3:cuda`, and verify with `npm run diagnose:sam3`.
+- Use `SAM3_VIDEO_ROOT=./data/video` and `SAM3_CHECKPOINT_PATH=./models/sam3.pt` for no-Docker development.
+
 [2026-07-17 15:49 HKT]
 - Ran `python3 -m pytest tests`: 42 tests passed.
 - Ran `npm --prefix frontend run build`: Next.js production build and TypeScript checks passed.

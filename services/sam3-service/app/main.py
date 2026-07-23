@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import asyncio
 import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.tracking_backend import TrackingBackend, TrackingJob, build_tracking_backend, tracking_error_payload
@@ -116,14 +117,23 @@ async def _run_tracking(payload: TrackingStartRequest) -> None:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    backend_status = get_tracking_backend().status()
+    backend = get_tracking_backend()
+    backend_status = backend.status()
+    backend_config = getattr(backend, "config", None)
     checkpoint_path = Path(os.getenv("SAM3_CHECKPOINT_PATH", "./models/sam3.pt")).expanduser()
     cuda_available: bool | None = None
+    cuda_version: str | None = None
+    gpu_name: str | None = None
+    torch_version: str | None = None
     try:
         import torch
 
+        torch_version = torch.__version__
+        cuda_version = torch.version.cuda
         cuda_available = bool(torch.cuda.is_available())
-    except ImportError:
+        if cuda_available:
+            gpu_name = torch.cuda.get_device_name(0)
+    except (ImportError, RuntimeError):
         cuda_available = None
     return {
         "status": "ok" if backend_status.ready else "degraded",
@@ -131,10 +141,15 @@ async def health() -> dict[str, Any]:
         "backend_ready": backend_status.ready,
         "backend_error": backend_status.code,
         "backend_message": backend_status.message,
-        "checkpoint_path": str(checkpoint_path),
+        "checkpoint_path": str(checkpoint_path.resolve()),
         "checkpoint_exists": checkpoint_path.exists(),
         "device": os.getenv("SAM3_DEVICE") or None,
+        "torch_version": torch_version,
+        "cuda_version": cuda_version,
         "cuda_available": cuda_available,
+        "gpu_name": gpu_name,
+        "max_propagation_frames": getattr(backend_config, "max_frames", None),
+        "image_size": getattr(backend_config, "image_size", None),
         "simulation_enabled": os.getenv("SAM3_TRACKING_BACKEND", "sam3").strip().lower() == "simulation"
         and os.getenv("SAM3_ALLOW_SIMULATION_FALLBACK", "false").lower() == "true",
     }
@@ -168,11 +183,22 @@ async def tracking_status(tracking_job_id: str) -> dict[str, Any]:
     }
 
 
+@app.get("/tracking/video/{tracking_job_id}")
+async def tracking_video(tracking_job_id: str) -> FileResponse:
+    if not re.fullmatch(r"[A-Za-z0-9-]+", tracking_job_id):
+        raise HTTPException(status_code=400, detail="Invalid tracking job ID")
+    output_root = Path(os.getenv("SAM3_RENDERED_VIDEO_ROOT", "./data/tracking")).expanduser()
+    video_path = output_root / f"{tracking_job_id}.mp4"
+    if not video_path.is_file():
+        raise HTTPException(status_code=404, detail="Rendered tracking video was not found")
+    return FileResponse(video_path, media_type="video/mp4", filename=f"{tracking_job_id}.mp4")
+
+
 @app.get("/tracking/events/{tracking_job_id}")
 async def tracking_events(tracking_job_id: str) -> StreamingResponse:
     async def stream() -> Any:
         last_payload = ""
-        for _ in range(120):
+        for _ in range(3600):
             payload = state_client.get(f"tracking:{tracking_job_id}")
             if payload and payload != last_payload:
                 yield f"data: {payload}\n\n"

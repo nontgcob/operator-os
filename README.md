@@ -20,6 +20,8 @@ OperatorOS is a video-first multimodal orchestration platform built around a reu
    - `npm run dev`
 4. Open `http://localhost:3000`.
 
+The checked-in VS Code workspace settings load the repository `.env` into new Python terminals and select the local `.venv` interpreter. Restart existing terminals after changing `.env`.
+
 Docker Compose is still available for containerized runs with `docker compose up --build`, but it is no longer the default development path.
 
 ## Demo configuration
@@ -33,8 +35,10 @@ Docker Compose is still available for containerized runs with `docker compose up
 - If YouTube asks to confirm you are not a bot, requires login, or returns HTTP 429/rate-limit errors, there is no reliable universal cookie-free fix. For login/account-gated cases, create `./data/ytdlp/`, export browser cookies to `./data/ytdlp/cookies.txt`, set `YTDLP_COOKIES_FILE=./data/ytdlp/cookies.txt`, then restart the local video service. For rate limiting or poor IP reputation, retry later or use a different network. Do not commit exported cookies.
 - Real SAM3 tracking uses Ultralytics SAM3 predictors with a local `sam3.pt` checkpoint. Put the weight at `models/sam3.pt` or set `SAM3_CHECKPOINT_PATH` to the local path.
 - Install real SAM3/GPU dependencies with `npm run setup:sam3` on the RTX 4090 machine.
+- On Windows with an NVIDIA GPU, install the CUDA 12.6 PyTorch wheels after the SAM3 dependencies with `npm run setup:sam3:cuda`. A normal PyPI install may silently select CPU-only PyTorch.
+- Run `npm run diagnose:sam3` before starting the app. It should report `CUDA available: True`, the RTX 4090, and an existing `models/sam3.pt` checkpoint.
 - Keep `SAM3_ALLOW_SIMULATION_FALLBACK=false` for real demos. Set it to `true` only for development when explicit simulated overlays are acceptable.
-- `SAM3_MAX_PROPAGATION_FRAMES` controls how many overlay frames are generated, and `SAM3_MAX_POLYGON_POINTS` caps mask polygon size before streaming overlays back to the frontend.
+- SAM3 processes consecutive video frames at the source FPS, stores the completed mask-coordinate timeline, and replays it with the video. `SAM3_MAX_PROPAGATION_FRAMES=0` processes the full remaining video; set a positive value to cap the tracking window. `SAM3_IMAGE_SIZE` controls inference resolution, and `SAM3_MAX_POLYGON_POINTS` controls mask contour detail.
 - Leave `USE_WORKER_QUEUE=false` for direct service calls, or set it to `true` to route tracking starts through the included RQ worker.
 
 ## Development

@@ -472,6 +472,47 @@ async def tracking_events(tracking_job_id: str) -> StreamingResponse:
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
+@app.get("/tracking/video/{tracking_job_id}")
+async def tracking_video(tracking_job_id: str, request: Request) -> StreamingResponse:
+    headers = {}
+    if range_header := request.headers.get("range"):
+        headers["Range"] = range_header
+    client = httpx.AsyncClient(timeout=None)
+    upstream = await client.send(
+        client.build_request(
+            "GET",
+            f"{SAM3_SERVICE_URL}/tracking/video/{tracking_job_id}",
+            headers=headers,
+        ),
+        stream=True,
+    )
+    if upstream.status_code >= 400:
+        detail = await upstream.aread()
+        await upstream.aclose()
+        await client.aclose()
+        raise HTTPException(status_code=upstream.status_code, detail=detail.decode())
+
+    async def stream_video() -> Any:
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    passthrough = {
+        key: value
+        for key, value in upstream.headers.items()
+        if key.lower() in {"accept-ranges", "content-length", "content-range"}
+    }
+    return StreamingResponse(
+        stream_video(),
+        status_code=upstream.status_code,
+        headers=passthrough,
+        media_type="video/mp4",
+    )
+
+
 def _load_conversation(session_id: str) -> list[dict[str, str]]:
     raw = state_client.get(f"conversation:{session_id}")
     if not raw:

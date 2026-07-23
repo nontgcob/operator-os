@@ -35,6 +35,7 @@ ANNOTATION QUALITY RULES:
 - Never use decorative annotations. Every annotation must correspond to a concrete visible target requested by the user or directly cited in the answer.
 - If one object should be tracked through the video, put a tight rect/polygon/circle around that exact object in `tracking_annotations`.
 - Write `tracking_prompt` as a concise object description suitable for SAM3, grounded in the current frame only.
+- If the user explicitly asks to track, follow, trace, or monitor an object, you MUST return a non-empty `tracking_prompt` naming that object. A tracking annotation is preferred but is not required; SAM3 can track from text alone.
 - If there is no clearly trackable object, use an empty string for `tracking_prompt` and an empty array for `tracking_annotations`.
 """
 
@@ -100,6 +101,7 @@ def build_prompt(
         "- For thumbnails or other tiny parts, annotate only the nail itself when visible, not the whole thumb.\n"
         "- Return one annotation per requested target when the user names distinct targets.\n"
         "- If tracking is appropriate, return `tracking_prompt` and `tracking_annotations` for the single object of interest.\n"
+        "- An explicit user request to track, follow, trace, or monitor always makes tracking appropriate; return a concise non-empty `tracking_prompt` even if you cannot provide a box.\n"
         "- The tracking annotation must be tighter than a general explanatory annotation and must identify only the object SAM3 should follow.\n"
         "- Do not invent manual details that are absent from the retrieved excerpts.\n"
         "- When relevant, mention the annotated region using the normalized coordinate frame."
