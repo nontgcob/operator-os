@@ -40,6 +40,7 @@ Docker Compose is still available for containerized runs with `docker compose up
 - Keep `SAM3_ALLOW_SIMULATION_FALLBACK=false` for real demos. Set it to `true` only for development when explicit simulated overlays are acceptable.
 - SAM3 processes consecutive video frames at the source FPS, stores the completed mask-coordinate timeline, and replays it with the video. `SAM3_MAX_PROPAGATION_FRAMES=0` processes the full remaining video; set a positive value to cap the tracking window. `SAM3_IMAGE_SIZE` controls inference resolution, and `SAM3_MAX_POLYGON_POINTS` controls mask contour detail.
 - Leave `USE_WORKER_QUEUE=false` for direct service calls, or set it to `true` to route tracking starts through the included RQ worker.
+- Every chat message is appended to `CHAT_LOG_PATH` (default `./data/chat-logs/chat-conversations.jsonl`) for product analysis. Logs are not loaded into the UI and do not enable resuming past conversations.
 
 ## Development
 

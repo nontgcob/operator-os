@@ -28,6 +28,7 @@ interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  createdAt: string;
   error?: boolean;
   model?: string;
   documents?: string[];
@@ -323,6 +324,47 @@ export default function Home() {
     setTrackingStatus("");
     setTrackingError("");
     setChatMessages([]);
+  }
+
+  function downloadChat() {
+    if (!chatMessages.length) return;
+
+    const exportedAt = new Date();
+    const lines = [
+      "# OperatorOS Conversation",
+      "",
+      `- Exported: ${exportedAt.toLocaleString()}`,
+      `- Session ID: ${sessionId}`,
+      `- Video: ${videoTitle || videoId || "Unknown"}`,
+      "",
+      ...chatMessages.flatMap((message) => {
+        const details = [
+          message.model ? `Model: ${message.model}` : "",
+          message.documents?.length ? `RAG documents: ${message.documents.join(", ")}` : "",
+          message.role === "user"
+            ? `Annotated snapshot: ${message.annotatedSnapshot ? "sent" : "not sent"}`
+            : "",
+          message.error ? "Status: error" : "",
+        ].filter(Boolean);
+        return [
+          `## ${message.role === "user" ? "User" : "Operator OS"} — ${new Date(message.createdAt).toLocaleString()}`,
+          "",
+          ...(details.length ? [details.join(" · "), ""] : []),
+          message.content,
+          "",
+        ];
+      }),
+    ];
+    const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
+    const downloadUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const filenameTimestamp = exportedAt.toISOString().replace(/[:.]/g, "-");
+    link.href = downloadUrl;
+    link.download = `operator-os-chat-${filenameTimestamp}.md`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(downloadUrl);
   }
 
   function clearAnnotations() {
@@ -639,16 +681,24 @@ export default function Home() {
     const includeAnnotatedSnapshot = sendAnnotatedSnapshot;
     const userMessageId = crypto.randomUUID();
     const assistantMessageId = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
     setChatMessages((prev) => [
       ...prev,
       {
         id: userMessageId,
         role: "user",
         content: trimmedQuestion,
+        createdAt,
         documents: attachedDocuments,
         annotatedSnapshot: includeAnnotatedSnapshot,
       },
-      { id: assistantMessageId, role: "assistant", content: "Thinking...", model: selectedModel },
+      {
+        id: assistantMessageId,
+        role: "assistant",
+        content: "Thinking...",
+        createdAt,
+        model: selectedModel,
+      },
     ]);
     setQuestion("");
     closeTrackingEventSource();
@@ -1227,7 +1277,33 @@ export default function Home() {
           </div>
 
           <div className="op-card">
-            <h2 className="op-card-title">Conversation</h2>
+            <div className="op-card-heading">
+              <h2 className="op-card-title">Conversation</h2>
+              <button
+                type="button"
+                className="op-download-button"
+                onClick={downloadChat}
+                disabled={!chatMessages.length || loading}
+                title={
+                  loading
+                    ? "Wait for the current response to finish"
+                    : chatMessages.length
+                    ? "Download the entire conversation"
+                    : "Start a conversation before downloading"
+                }
+              >
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+                  <path
+                    d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                Download chat
+              </button>
+            </div>
             <div className="op-chat-panel">
               <div className="op-chat-history">
                 {chatMessages.length ? (

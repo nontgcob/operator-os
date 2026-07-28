@@ -26,6 +26,11 @@ try:
 except ImportError:
     from memory import append_rolling_conversation
 
+try:
+    from .chat_log import ChatLog
+except ImportError:
+    from chat_log import ChatLog
+
 app = FastAPI(title="OperatorOS Orchestrator", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -39,6 +44,7 @@ VIDEO_SERVICE_URL = os.getenv("VIDEO_SERVICE_URL", "http://localhost:8002")
 SAM3_SERVICE_URL = os.getenv("SAM3_SERVICE_URL", "http://localhost:8003")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 USE_REDIS_STATE = os.getenv("USE_REDIS_STATE", "false").lower() == "true"
+CHAT_LOG_PATH = os.getenv("CHAT_LOG_PATH", "./data/chat-logs/chat-conversations.jsonl")
 
 
 def _env_positive_float(name: str, default: float) -> float:
@@ -86,10 +92,39 @@ def _build_state_client() -> Any:
 
 
 state_client = _build_state_client()
+chat_log = ChatLog(CHAT_LOG_PATH)
 
 
 def _log_event(event_type: str, **fields: Any) -> None:
     print(json.dumps({"event": event_type, "ts": time.time(), **fields}))
+
+
+def _record_chat_message(
+    *,
+    session_id: str,
+    exchange_id: str,
+    role: str,
+    content: str,
+    status: str,
+    context: dict[str, Any] | None = None,
+) -> None:
+    try:
+        chat_log.append_message(
+            session_id=session_id,
+            exchange_id=exchange_id,
+            role=role,
+            content=content,
+            status=status,
+            context=context,
+        )
+    except OSError as exc:
+        # Chat logging must never make inference unavailable.
+        _log_event(
+            "chat_log_failed",
+            session_id=session_id,
+            exchange_id=exchange_id,
+            error=str(exc),
+        )
 
 
 def _sse(payload: str, event: str | None = None) -> str:
@@ -354,13 +389,54 @@ async def document_retrieve(payload: DocumentRetrieveRequest) -> Any:
 
 @app.post("/chat/stream")
 async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
+    exchange_id = str(uuid4())
+    chat_context = {
+        "video_id": payload.video_id,
+        "video_title": payload.video_title,
+        "video_timestamp_seconds": payload.timestamp,
+        "model": payload.model,
+        "document_ids": payload.document_ids,
+        "annotation_count": len(payload.annotations),
+        "annotated_snapshot_sent": payload.annotated_frame_data_url is not None,
+    }
+    _record_chat_message(
+        session_id=payload.session_id,
+        exchange_id=exchange_id,
+        role="user",
+        content=payload.question,
+        status="received",
+        context=chat_context,
+    )
     _log_event("inference_started", session_id=payload.session_id, video_id=payload.video_id, timestamp=payload.timestamp)
-    async with httpx.AsyncClient(timeout=60) as client:
-        retrieved_chunks = await _retrieve_document_chunks(
-            client,
-            payload.document_ids,
-            payload.question,
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            retrieved_chunks = await _retrieve_document_chunks(
+                client,
+                payload.document_ids,
+                payload.question,
+            )
+    except HTTPException as exc:
+        message = f"Document retrieval failed: {exc.detail}"
+        _record_chat_message(
+            session_id=payload.session_id,
+            exchange_id=exchange_id,
+            role="assistant",
+            content=message,
+            status="error",
+            context={"model": payload.model},
         )
+        raise
+    except httpx.HTTPError as exc:
+        message = f"Document retrieval failed: {exc}"
+        _record_chat_message(
+            session_id=payload.session_id,
+            exchange_id=exchange_id,
+            role="assistant",
+            content=message,
+            status="error",
+            context={"model": payload.model},
+        )
+        raise HTTPException(status_code=502, detail=message) from exc
     request_body = {
         "question": payload.question,
         "video_title": payload.video_title,
@@ -385,7 +461,16 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
                 ) as response:
                     if response.status_code >= 400:
                         text = await response.aread()
-                        yield _sse(f"RAGVLM returned HTTP {response.status_code}: {text.decode()}", event="error")
+                        message = f"RAGVLM returned HTTP {response.status_code}: {text.decode()}"
+                        _record_chat_message(
+                            session_id=payload.session_id,
+                            exchange_id=exchange_id,
+                            role="assistant",
+                            content=message,
+                            status="error",
+                            context={"model": payload.model},
+                        )
+                        yield _sse(message, event="error")
                         return
 
                     current_event = "message"
@@ -397,6 +482,14 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
                             continue
                         chunk = line[6:]
                         if current_event == "error":
+                            _record_chat_message(
+                                session_id=payload.session_id,
+                                exchange_id=exchange_id,
+                                role="assistant",
+                                content=chunk,
+                                status="error",
+                                context={"model": payload.model},
+                            )
                             yield _sse(chunk, event="error")
                             return
                         if chunk == "[DONE]":
@@ -404,10 +497,37 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
                         full_text += chunk
                         yield _sse(chunk)
                     _append_conversation(payload.session_id, payload.question, full_text)
+                    _record_chat_message(
+                        session_id=payload.session_id,
+                        exchange_id=exchange_id,
+                        role="assistant",
+                        content=full_text,
+                        status="completed",
+                        context={"model": payload.model},
+                    )
                     _log_event("inference_completed", session_id=payload.session_id, answer_len=len(full_text))
                     yield _sse("[DONE]")
+        except asyncio.CancelledError:
+            _record_chat_message(
+                session_id=payload.session_id,
+                exchange_id=exchange_id,
+                role="assistant",
+                content=full_text,
+                status="cancelled",
+                context={"model": payload.model},
+            )
+            raise
         except httpx.HTTPError as exc:
-            yield _sse(f"RAGVLM stream failed: {exc}", event="error")
+            message = f"RAGVLM stream failed: {exc}"
+            _record_chat_message(
+                session_id=payload.session_id,
+                exchange_id=exchange_id,
+                role="assistant",
+                content=message,
+                status="error",
+                context={"model": payload.model},
+            )
+            yield _sse(message, event="error")
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 

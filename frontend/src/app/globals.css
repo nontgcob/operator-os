@@ -108,6 +108,37 @@ button {
   margin: 0 0 12px;
 }
 
+.op-card-heading {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.op-card-heading .op-card-title {
+  margin-bottom: 0;
+}
+
+.op-download-button {
+  align-items: center;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  display: inline-flex;
+  font-size: 0.78rem;
+  font-weight: 500;
+  gap: 6px;
+  padding: 7px 10px;
+}
+
+.op-download-button:hover:not(:disabled) {
+  background: var(--bg-input);
+  border-color: #cbd5e1;
+  color: var(--text);
+}
+
 .op-upload-row {
   display: grid;
   gap: 12px;
