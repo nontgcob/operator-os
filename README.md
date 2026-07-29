@@ -1,4 +1,4 @@
-ose # OperatorOS
+# OperatorOS
 
 OperatorOS is a video-first multimodal orchestration platform built around a reusable RAGVLM reasoning engine.
 
@@ -6,7 +6,8 @@ OperatorOS is a video-first multimodal orchestration platform built around a reu
 
 - `frontend/` - Next.js video player + chat + overlays
 - `services/orchestrator/` - FastAPI orchestration API and event stream
-- `services/ragvlm-service/` - FastAPI wrapper around multimodal RAGVLM inference
+- `services/ragvlm-service/` - page-aware text RAG, converted-manual artifacts, and legacy RAGVLM inference
+- `services/multimodal-rag-service/` - independent original-PDF page retrieval and visual answering
 - `services/video-service/` - media ingestion, frame extraction, transcript indexing
 - `services/sam3-service/` - async SAM3 segmentation/tracking API with explicit development simulation fallback
 - `workers/` - background queue workers for tracking jobs
@@ -27,7 +28,10 @@ Docker Compose is still available for containerized runs with `docker compose up
 ## Demo configuration
 
 - Set `OPENROUTER_API_KEY` before using contextual chat.
-- RAGVLM document ingestion uses the upstream-style OpenRouter embeddings path with `RAGVLM_EMBEDDING_MODEL` (default `openai/text-embedding-3-small`) and stores a local JSON index under `RAGVLM_DOCUMENT_DIR`.
+- PDF ingestion fans out to two independent pipelines. Text RAG creates a page-marked Markdown derivative under `RAGVLM_DOCUMENT_DIR`; multimodal RAG retains and indexes the original PDF under `MULTIMODAL_RAG_DATA_DIR`.
+- RAGVLM document ingestion uses the OpenRouter embeddings path with `RAGVLM_EMBEDDING_MODEL` (default `openai/text-embedding-3-small`) and a deterministic local fallback when no key is configured.
+- Questions with selected PDFs produce blinded Answer A/B comparisons. The hidden mapping and submitted preference are persisted in `RAG_COMPARISON_DB_PATH`; identities are returned only after the reveal request.
+- Both answer envelopes include validated original-document page citations and explicit `document`, `model_knowledge`, `mixed`, or `insufficient` provenance.
 - Whisper transcription uses `WHISPER_MODEL` and falls back to deterministic timestamped segments if Whisper cannot run.
 - YouTube URL ingestion is handled by `video-service` with `yt-dlp`, `ffmpeg`, yt-dlp EJS support, Deno, and the `curl-cffi` extra for optional yt-dlp-supported request impersonation. `YTDLP_JS_RUNTIME=deno:/usr/local/bin/deno` enables the installed Deno runtime explicitly, and `YTDLP_REMOTE_COMPONENTS=ejs:github` allows yt-dlp to fetch current EJS challenge solver scripts when the packaged components are stale. Check `http://localhost:8002/diagnostics/ytdlp` after rebuild to confirm runtime availability.
 - Cookie-free public-video tuning is available through `YTDLP_EXTRACTOR_ARGS`, `YTDLP_YOUTUBE_PLAYER_CLIENTS` (for example `mweb,default`), `YTDLP_YOUTUBE_FETCH_PO_TOKEN` (`auto`, `always`, or `never`), and `YTDLP_PO_TOKEN_PROVIDER_ARGS` (for example `youtubepot-bgutilhttp:base_url=http://po-token-provider:4416`). PO Token Provider plugins are not bundled; install a maintained provider in a custom image or environment, then pass its provider-specific args with these env vars.
@@ -47,5 +51,6 @@ Docker Compose is still available for containerized runs with `docker compose up
 - API docs:
   - Orchestrator: `http://localhost:8000/docs`
   - RAGVLM service: `http://localhost:8001/docs`
+  - Multimodal RAG service: `http://localhost:8004/docs`
   - Video service: `http://localhost:8002/docs`
   - SAM3 service: `http://localhost:8003/docs`

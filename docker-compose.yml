@@ -11,8 +11,22 @@ services:
     env_file:
       - path: .env
         required: false
+    volumes:
+      - ./data:/app/data
     ports:
       - "8001:8001"
+
+  multimodal-rag-service:
+    build:
+      context: .
+      dockerfile: infra/docker/multimodal-rag-service/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8004:8004"
 
   video-service:
     build:
@@ -51,8 +65,11 @@ services:
     depends_on:
       - redis
       - ragvlm-service
+      - multimodal-rag-service
       - video-service
       - sam3-service
+    environment:
+      MULTIMODAL_RAG_SERVICE_URL: http://multimodal-rag-service:8004
     volumes:
       - ./data:/app/data
     ports:

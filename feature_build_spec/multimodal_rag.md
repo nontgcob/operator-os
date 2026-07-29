@@ -5,7 +5,7 @@
 **Product area:** OperatorOS knowledge and document intelligence  
 **Feature:** Multimodal RAG for visually rich operational documents  
 **Document status:** Draft PRD  
-**Last updated:** 2026-07-27  
+**Last updated:** 2026-07-28
 **Reference case:** Bambu Lab P1S quick-start manual
 
 ---
@@ -36,6 +36,78 @@ The first concrete reference document is the Bambu Lab P1S quick-start manual. I
 The core design principle is:
 
 > Retrieve visually, enrich structurally, and answer from the original evidence.
+
+### 1.1 OperatorOS Two-Pipeline RAG Strategy
+
+OperatorOS will ship two deliberately independent document-answering pipelines:
+
+1. **Text RAG (Pipeline T):** the original manual is converted into a faithful,
+   page-preserving Markdown derivative. That derivative is indexed by the
+   existing text embedding and retrieval system. Answers cite the original
+   manual and original page, never the derivative filename.
+2. **Multimodal RAG (Pipeline M):** the original manual is rendered, visually
+   indexed, retrieved, and answered directly by the standalone pipeline
+   specified in this document. It does not call Pipeline T, read Pipeline T's
+   converted artifact, or reuse Pipeline T's retrieval results.
+
+A shared upload may provide the same immutable original PDF to both pipelines,
+but their derived assets, indexes, retrieval traces, and answers remain
+separate. Dense text, lexical search, table extraction, and visual descriptions
+described later in this document are owned by Pipeline M and do not connect it
+to the existing text RAG.
+
+For a question with at least one queryable PDF selected, the OperatorOS
+orchestrator sends the same question and shared conversational/video context to
+both pipelines concurrently. It presents the results as blinded **Answer A**
+and **Answer B** cards. The server assigns the two pipelines to A/B with an
+imbalance-correcting randomizer: when historical left-side assignments are
+tied inside the same chat session, it uses a cryptographically secure fair
+coin; when one pipeline has appeared on the left more often in that session,
+the next comparison assigns the other pipeline to the left. Sessions are
+isolated: imbalance from one chat must never affect another chat. This keeps
+each conversation's persisted experiment split at 50/50 instead of allowing
+long random streaks. Pipeline identity is not sent to the client until the
+user selects A or B and submits the selection through the reveal action.
+
+The required product-level build order is:
+
+1. Page-aware citations and explicit answer provenance in the current chatbot.
+2. The manual-to-text conversion pipeline and its integration with current text
+   RAG.
+3. The standalone multimodal pipeline in this document.
+4. Concurrent blind comparison, persisted preference feedback, and pipeline
+   reveal.
+
+The companion specification
+`feature_build_spec/text_based_manual_conversion_rag.md` defines Pipeline T.
+
+### 1.2 Shared Answer Provenance
+
+Both pipelines use the same outward answer envelope and inline citation style.
+Document citations contain a server-issued citation ID, original document
+version, filename, 1-based page number, supporting excerpt, and an optional
+section, figure, table, or region locator. The server validates cited IDs
+against evidence supplied to the answer model.
+
+Every answer declares one of these provenance values:
+
+- `document`
+- `video_frame`
+- `transcript`
+- `model_knowledge`
+- `mixed`
+- `insufficient`
+
+For blind PDF comparisons, both pipelines run in document-grounded mode:
+`allow_model_knowledge=false`. A comparison answer should use original manual
+evidence and validated citations or report insufficient evidence. Model
+internal knowledge remains available in non-comparison answer paths only when
+explicitly allowed and disclosed.
+
+Model internal knowledge is allowed only when it is explicitly disclosed.
+Mixed answers must keep document-backed claims cited and must label the
+remaining content as model knowledge. A pipeline must not invent page numbers
+or silently present model knowledge as manual evidence.
 
 ---
 
@@ -1425,6 +1497,10 @@ For operational, electrical, mechanical, or safety-sensitive instructions:
 
 ## 19. Rollout Plan
 
+The phases below describe Pipeline M itself. They begin only after the shared
+page-citation foundation and Pipeline T conversion work defined in Sections
+1.1-1.2 and the companion conversion specification are complete.
+
 ### Phase 0: Prototype
 
 Goal:
@@ -1549,6 +1625,11 @@ Exit criteria:
 
 ## 20. Implementation Milestones
 
+These are Pipeline M milestones nested inside program stage 3. OperatorOS
+program stages 1 and 2 are, respectively, page-aware provenance/citations and
+the independent text-conversion pipeline. Blind comparison integration is
+program stage 4 after Milestone 5 is usable.
+
 ### Milestone 1: Bambu Manual Prototype
 
 Deliverables:
@@ -1653,6 +1734,45 @@ Acceptance:
 ---
 
 ## 21. API Sketch
+
+### 21.0 Product-Level Blind Comparison
+
+Pipeline-specific answer endpoints are internal. The product calls both through
+the orchestrator:
+
+```http
+POST /chat/comparisons/stream
+Content-Type: application/json
+```
+
+The stream exposes `comparison_started`, labeled `answer_delta`,
+`answer_complete` or `answer_error`, and `comparison_complete` events. Events
+contain only the opaque comparison ID and Answer A/B labels; pipeline
+identities remain server-side.
+
+After both answers complete, the user submits:
+
+```http
+POST /chat/comparisons/{comparison_id}/reveal
+Content-Type: application/json
+
+{"selected_label": "A"}
+```
+
+The server atomically records the choice and then returns:
+
+```json
+{
+  "comparison_id": "cmp_01",
+  "selected_label": "A",
+  "mapping": {
+    "A": "multimodal_rag",
+    "B": "text_rag"
+  }
+}
+```
+
+Partial comparisons remain visible but cannot be voted on or revealed.
 
 ### 21.1 Upload Document
 
@@ -1918,6 +2038,10 @@ Initial assets to create from the reference manual:
 ---
 
 ## 28. Appendix C: Recommended MVP Build Order
+
+The following list is the internal build order for Pipeline M, not the overall
+OperatorOS program order. The overall order is citations, Pipeline T,
+Pipeline M, and then blinded A/B integration.
 
 1. Render the Bambu P1S manual pages.
 2. Build a page image manifest.

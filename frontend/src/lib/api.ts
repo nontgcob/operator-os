@@ -1,6 +1,8 @@
 import type {
   Annotation,
+  ComparisonRevealResponse,
   DocumentIngestResponse,
+  DocumentStatusResponse,
   MediaIngestResponse,
   TranscriptWindowResponse,
   VideoMetadataResponse,
@@ -117,6 +119,14 @@ export async function uploadDocument(file: File): Promise<DocumentIngestResponse
   return response.json();
 }
 
+export async function getDocumentStatus(documentId: string): Promise<DocumentStatusResponse> {
+  const response = await fetch(
+    `${BASE_URL}/documents/${encodeURIComponent(documentId)}/status`
+  );
+  if (!response.ok) throw new Error(await readApiError(response));
+  return response.json();
+}
+
 export async function askQuestion(input: {
   session_id: string;
   video_id: string;
@@ -135,6 +145,63 @@ export async function askQuestion(input: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
+}
+
+export async function askComparison(input: {
+  session_id: string;
+  video_id?: string;
+  video_title?: string;
+  timestamp?: number;
+  frame_data_url?: string;
+  annotated_frame_data_url?: string;
+  question: string;
+  annotations: Annotation[];
+  transcript_window?: TranscriptWindowResponse;
+  document_ids: string[];
+  model?: string;
+  retry_of?: string;
+}): Promise<Response> {
+  return fetch(`${BASE_URL}/chat/comparisons/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function revealComparison(
+  comparisonId: string,
+  selectedLabel: "A" | "B"
+): Promise<ComparisonRevealResponse> {
+  const response = await fetch(
+    `${BASE_URL}/chat/comparisons/${encodeURIComponent(comparisonId)}/reveal`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ selected_label: selectedLabel }),
+    }
+  );
+  if (!response.ok) throw new Error(await readApiError(response));
+  const result = (await response.json()) as ComparisonRevealResponse & {
+    pipelines?: Record<"A" | "B", string>;
+  };
+  return { ...result, mapping: result.mapping ?? result.pipelines };
+}
+
+export async function getConvertedText(documentId: string): Promise<string> {
+  const response = await fetch(
+    `${BASE_URL}/documents/${encodeURIComponent(documentId)}/converted-text`
+  );
+  if (!response.ok) throw new Error(await readApiError(response));
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    const value = (await response.json()) as { text?: string; content?: string; markdown?: string };
+    return value.text ?? value.content ?? value.markdown ?? "";
+  }
+  return response.text();
+}
+
+export function getConvertedTextDownloadUrl(documentId: string): string {
+  return `${BASE_URL}/documents/${encodeURIComponent(documentId)}/converted-text/download`;
 }
 
 export async function startTracking(input: {

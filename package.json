@@ -6,7 +6,7 @@
     "setup": "npm install && npm --prefix frontend install && node scripts/python-env.mjs setup",
     "setup:sam3": "node scripts/python-env.mjs pip install -r services/sam3-service/requirements.txt",
     "setup:sam3:cuda": "node scripts/python-env.mjs pip install --upgrade --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu126",
-    "dev": "concurrently -n frontend,orchestrator,ragvlm,video,sam3 -c blue,green,magenta,cyan,yellow \"npm --prefix frontend run dev\" \"node scripts/python-env.mjs service services/orchestrator 8000\" \"node scripts/python-env.mjs service services/ragvlm-service 8001\" \"node scripts/python-env.mjs service services/video-service 8002\" \"node scripts/python-env.mjs service services/sam3-service 8003\"",
+    "dev": "concurrently -n frontend,orchestrator,ragvlm,multimodal,video,sam3 -c blue,green,magenta,white,cyan,yellow \"npm --prefix frontend run dev\" \"node scripts/python-env.mjs service services/orchestrator 8000\" \"node scripts/python-env.mjs service services/ragvlm-service 8001\" \"node scripts/python-env.mjs service services/multimodal-rag-service 8004\" \"node scripts/python-env.mjs service services/video-service 8002\" \"node scripts/python-env.mjs service services/sam3-service 8003\"",
     "test": "node scripts/python-env.mjs pytest tests",
     "diagnose:sam3": "node scripts/python-env.mjs diagnose-sam3"
   },

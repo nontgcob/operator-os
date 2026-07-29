@@ -6,5 +6,6 @@ python-multipart
 pydantic
 pypdf
 python-docx
+PyMuPDF
 yt-dlp[default,curl-cffi]
 openai-whisper

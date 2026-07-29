@@ -80,6 +80,81 @@ export interface DocumentIngestResponse {
   document_id: string;
   filename: string;
   chunk_count: number;
+  status?: string;
+  pipelines?: Record<string, { status?: string; chunk_count?: number; error?: string }>;
+}
+
+export interface DocumentStatusResponse {
+  document_id: string;
+  status: "processing" | "queryable" | "partial" | string;
+  pipelines: Record<
+    string,
+    { status?: string; chunk_count?: number; error?: string; warnings?: unknown[] }
+  >;
+}
+
+export type AnswerLabel = "A" | "B";
+export type AnswerStatus = "pending" | "streaming" | "complete" | "error";
+export type AnswerProvenance =
+  | "document"
+  | "video_frame"
+  | "transcript"
+  | "model_knowledge"
+  | "mixed"
+  | "insufficient";
+
+export interface AnswerCitation {
+  citation_id: string;
+  source_kind: "document" | "video_frame" | "transcript" | "model_knowledge";
+  document_id?: string;
+  document_version?: string;
+  filename?: string;
+  page?: number;
+  section?: string;
+  block?: string;
+  excerpt?: string;
+  region_id?: string;
+  figure_id?: string;
+  table_id?: string;
+  bbox?: [number, number, number, number];
+  timestamp?: number;
+}
+
+export interface ComparisonAnswer {
+  answer_id?: string;
+  label: AnswerLabel;
+  status: AnswerStatus;
+  text: string;
+  provenance?: AnswerProvenance;
+  citations: AnswerCitation[];
+  annotations: Annotation[];
+  tracking_prompt?: string;
+  tracking_annotations: Annotation[];
+  error?: string;
+  pipeline?: string;
+}
+
+export interface ComparisonTurn {
+  comparison_id?: string;
+  status: "streaming" | "complete" | "partial" | "revealed" | "error";
+  answers: Record<AnswerLabel, ComparisonAnswer>;
+  selected_label?: AnswerLabel;
+  revealed: boolean;
+  reveal_error?: string;
+  retryable?: boolean;
+}
+
+export type ComparisonStreamEvent =
+  | { type: "comparison_started"; comparison_id: string }
+  | { type: "answer_delta"; label: AnswerLabel; delta: string }
+  | { type: "answer_complete"; label: AnswerLabel; answer: Partial<ComparisonAnswer> }
+  | { type: "answer_error"; label: AnswerLabel; message: string }
+  | { type: "comparison_complete"; comparison_id?: string };
+
+export interface ComparisonRevealResponse {
+  comparison_id: string;
+  selected_label: AnswerLabel;
+  mapping: Record<AnswerLabel, string>;
 }
 
 export interface TrackingOverlay {

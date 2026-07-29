@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import secrets
 import time
 import asyncio
 from typing import Any
@@ -10,7 +12,7 @@ from uuid import uuid4
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 try:
@@ -31,6 +33,11 @@ try:
 except ImportError:
     from chat_log import ChatLog
 
+try:
+    from .comparison_store import ComparisonStore
+except ImportError:
+    from comparison_store import ComparisonStore
+
 app = FastAPI(title="OperatorOS Orchestrator", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -40,11 +47,16 @@ app.add_middleware(
 )
 
 RAGVLM_SERVICE_URL = os.getenv("RAGVLM_SERVICE_URL", "http://localhost:8001")
+MULTIMODAL_RAG_SERVICE_URL = os.getenv("MULTIMODAL_RAG_SERVICE_URL", "http://localhost:8004")
 VIDEO_SERVICE_URL = os.getenv("VIDEO_SERVICE_URL", "http://localhost:8002")
 SAM3_SERVICE_URL = os.getenv("SAM3_SERVICE_URL", "http://localhost:8003")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 USE_REDIS_STATE = os.getenv("USE_REDIS_STATE", "false").lower() == "true"
 CHAT_LOG_PATH = os.getenv("CHAT_LOG_PATH", "./data/chat-logs/chat-conversations.jsonl")
+RAG_COMPARISON_DB_PATH = os.getenv(
+    "RAG_COMPARISON_DB_PATH",
+    "./data/rag-comparisons/comparisons.sqlite3",
+)
 
 
 def _env_positive_float(name: str, default: float) -> float:
@@ -93,6 +105,7 @@ def _build_state_client() -> Any:
 
 state_client = _build_state_client()
 chat_log = ChatLog(CHAT_LOG_PATH)
+comparison_store = ComparisonStore(RAG_COMPARISON_DB_PATH)
 
 
 def _log_event(event_type: str, **fields: Any) -> None:
@@ -164,6 +177,28 @@ class DocumentRetrieveRequest(BaseModel):
     question: str
     document_ids: list[str] = Field(default_factory=list)
     top_k: int = Field(default=4, ge=1, le=12)
+
+
+class ComparisonStreamRequest(BaseModel):
+    session_id: str
+    question: str
+    document_ids: list[str] = Field(default_factory=list)
+    video_id: str | None = None
+    video_title: str | None = None
+    timestamp: float | None = None
+    frame_data_url: str | None = None
+    annotated_frame_data_url: str | None = None
+    annotations: list[dict[str, Any]] = Field(default_factory=list)
+    transcript_window: TranscriptWindow | None = None
+    model: str | None = None
+    retry_of: str | None = None
+
+
+class ComparisonRevealRequest(BaseModel):
+    selected_label: str
+
+
+ComparisonStreamRequest.model_rebuild()
 
 
 class TrackingStartRequest(BaseModel):
@@ -360,18 +395,185 @@ async def document_ingest(
     file: UploadFile = File(...),
     document_id: str | None = None,
 ) -> Any:
-    payload = {"file": (file.filename, await file.read(), file.content_type)}
-    params = {"document_id": document_id} if document_id else None
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(
-            f"{RAGVLM_SERVICE_URL}/documents/ingest",
-            files=payload,
-            params=params,
+    data = await file.read()
+    filename = file.filename or "document.pdf"
+    resolved_document_id = document_id or hashlib.sha256(
+        filename.encode("utf-8") + b"\0" + data
+    ).hexdigest()[:16]
+    params = {"document_id": resolved_document_id}
+
+    async def ingest_into(url: str) -> httpx.Response:
+        payload = {"file": (filename, data, file.content_type)}
+        async with httpx.AsyncClient(timeout=300) as client:
+            return await client.post(url, files=payload, params=params)
+
+    text_task = asyncio.create_task(ingest_into(f"{RAGVLM_SERVICE_URL}/documents/ingest"))
+    multimodal_task = asyncio.create_task(
+        ingest_into(f"{MULTIMODAL_RAG_SERVICE_URL}/documents/ingest")
+    )
+    text_response, multimodal_result = await asyncio.gather(
+        text_task,
+        multimodal_task,
+        return_exceptions=True,
+    )
+    if isinstance(text_response, Exception):
+        raise HTTPException(status_code=502, detail=f"Text RAG ingestion failed: {text_response}")
+    if text_response.status_code >= 400:
+        raise HTTPException(status_code=text_response.status_code, detail=text_response.text)
+
+    result = dict(text_response.json())
+    result["document_id"] = resolved_document_id
+    result.setdefault("filename", filename)
+    result["pipelines"] = {
+        "text_rag": {
+            "status": result.get("status", "queryable"),
+        },
+        "multimodal_rag": {"status": "processing"},
+    }
+    if isinstance(multimodal_result, Exception):
+        result["pipelines"]["multimodal_rag"] = {
+            "status": "error",
+            "error": str(multimodal_result),
+        }
+    elif multimodal_result.status_code >= 400:
+        result["pipelines"]["multimodal_rag"] = {
+            "status": "error",
+            "error": multimodal_result.text,
+        }
+    else:
+        multimodal_payload = multimodal_result.json()
+        result["pipelines"]["multimodal_rag"] = {
+            "status": multimodal_payload.get("status", "queryable"),
+            **{
+                key: value
+                for key, value in multimodal_payload.items()
+                if key not in {"document_id", "filename", "status"}
+            },
+        }
+    _log_event(
+        "document_ingested",
+        filename=filename,
+        document_id=resolved_document_id,
+        multimodal_status=result["pipelines"]["multimodal_rag"]["status"],
+    )
+    return result
+
+
+async def _get_pipeline_status(url: str) -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(url)
+        if response.status_code >= 400:
+            return {"status": "error", "error": response.text}
+        return response.json()
+    except httpx.HTTPError as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+def _is_text_rag_queryable(status: dict[str, Any]) -> bool:
+    raw_status = status.get("status")
+    if raw_status in {"ready", "queryable", "complete", "completed"}:
+        return True
+    return raw_status == "partial" and int(status.get("chunk_count") or 0) > 0
+
+
+def _is_multimodal_rag_queryable(status: dict[str, Any]) -> bool:
+    raw_status = status.get("status")
+    if raw_status in {"ready", "queryable", "complete", "completed"}:
+        return True
+    if raw_status != "partial":
+        return False
+    return int(status.get("page_count") or 0) > 0 and bool(status.get("version"))
+
+
+@app.get("/documents/{document_id}/status")
+async def document_status(document_id: str) -> dict[str, Any]:
+    text_status, multimodal_status = await asyncio.gather(
+        _get_pipeline_status(f"{RAGVLM_SERVICE_URL}/documents/{document_id}/status"),
+        _get_pipeline_status(f"{MULTIMODAL_RAG_SERVICE_URL}/documents/{document_id}/status"),
+    )
+    normalized_statuses = {
+        "text_rag": (
+            "queryable"
+            if _is_text_rag_queryable(text_status)
+            else text_status.get("status")
+        ),
+        "multimodal_rag": (
+            "queryable"
+            if _is_multimodal_rag_queryable(multimodal_status)
+            else multimodal_status.get("status")
+        ),
+    }
+    return {
+        "document_id": document_id,
+        "status": (
+            "queryable"
+            if set(normalized_statuses.values()) == {"queryable"}
+            else "processing"
+            if "processing" in normalized_statuses.values()
+            else "partial"
+        ),
+        "pipelines": {
+            "text_rag": {**text_status, "status": normalized_statuses["text_rag"]},
+            "multimodal_rag": {
+                **multimodal_status,
+                "status": normalized_statuses["multimodal_rag"],
+            },
+        },
+    }
+
+
+@app.post("/documents/{document_id}/reprocess")
+async def reprocess_document(document_id: str) -> dict[str, Any]:
+    async def reprocess(url: str) -> dict[str, Any]:
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                response = await client.post(url)
+            if response.status_code >= 400:
+                return {"status": "error", "error": response.text}
+            return response.json()
+        except httpx.HTTPError as exc:
+            return {"status": "error", "error": str(exc)}
+
+    text_result, multimodal_result = await asyncio.gather(
+        reprocess(f"{RAGVLM_SERVICE_URL}/documents/{document_id}/reprocess"),
+        reprocess(f"{MULTIMODAL_RAG_SERVICE_URL}/documents/{document_id}/reprocess"),
+    )
+    return {
+        "document_id": document_id,
+        "pipelines": {
+            "text_rag": text_result,
+            "multimodal_rag": multimodal_result,
+        },
+    }
+
+
+async def _proxy_text_artifact(document_id: str, *, download: bool) -> Response:
+    suffix = "/download" if download else ""
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.get(
+            f"{RAGVLM_SERVICE_URL}/documents/{document_id}/converted-text{suffix}"
         )
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
-    _log_event("document_ingested", filename=file.filename)
-    return response.json()
+    headers: dict[str, str] = {}
+    if content_disposition := response.headers.get("content-disposition"):
+        headers["content-disposition"] = content_disposition
+    return Response(
+        content=response.content,
+        media_type=response.headers.get("content-type", "text/markdown"),
+        headers=headers,
+    )
+
+
+@app.get("/documents/{document_id}/converted-text")
+async def converted_text(document_id: str) -> Response:
+    return await _proxy_text_artifact(document_id, download=False)
+
+
+@app.get("/documents/{document_id}/converted-text/download")
+async def download_converted_text(document_id: str) -> Response:
+    return await _proxy_text_artifact(document_id, download=True)
 
 
 @app.post("/documents/retrieve")
@@ -385,6 +587,254 @@ async def document_retrieve(payload: DocumentRetrieveRequest) -> Any:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     _log_event("document_retrieved", document_count=len(payload.document_ids), question_len=len(payload.question))
     return response.json()
+
+
+def _new_blinded_mapping(session_id: str) -> dict[str, str]:
+    counts = comparison_store.mapping_counts(session_id)
+    text_left = counts.get("text_left", 0)
+    multimodal_left = counts.get("multimodal_left", 0)
+    if text_left < multimodal_left:
+        return {"A": "text_rag", "B": "multimodal_rag"}
+    if multimodal_left < text_left:
+        return {"A": "multimodal_rag", "B": "text_rag"}
+    if secrets.randbelow(2) == 0:
+        return {"A": "text_rag", "B": "multimodal_rag"}
+    return {"A": "multimodal_rag", "B": "text_rag"}
+
+
+def _comparison_answer_payload(answer: Any) -> dict[str, Any]:
+    """Normalize an answer while removing fields that could reveal its pipeline."""
+    if not isinstance(answer, dict):
+        return {
+            "answer_id": str(uuid4()),
+            "status": "error",
+            "text": "",
+            "provenance": "insufficient",
+            "citations": [],
+            "annotations": [],
+            "tracking_prompt": "",
+            "tracking_annotations": [],
+            "error": "Pipeline returned an invalid response.",
+        }
+    normalized = dict(answer)
+    for key in ("pipeline", "pipeline_id", "pipeline_name", "retriever", "retrievers"):
+        normalized.pop(key, None)
+    normalized.setdefault("answer_id", str(uuid4()))
+    raw_status = normalized.get("status", "completed")
+    normalized["status"] = (
+        "completed" if raw_status in {"complete", "completed", "insufficient"} else raw_status
+    )
+    normalized.setdefault("text", normalized.pop("answer", ""))
+    normalized.setdefault("provenance", "insufficient" if not normalized["text"] else "model_knowledge")
+    normalized.setdefault("citations", [])
+    normalized.setdefault("annotations", [])
+    normalized.setdefault("tracking_prompt", "")
+    normalized.setdefault("tracking_annotations", [])
+    normalized.setdefault("error", None)
+    if isinstance(normalized["citations"], list):
+        citations: list[dict[str, Any]] = []
+        for citation in normalized["citations"]:
+            if not isinstance(citation, dict):
+                continue
+            normalized_citation = {
+                key: value
+                for key, value in citation.items()
+                if key not in {"pipeline", "pipeline_id", "retriever", "retrievers"}
+            }
+            if "page_number" not in normalized_citation and "page" in normalized_citation:
+                normalized_citation["page_number"] = normalized_citation["page"]
+            if normalized_citation.get("source_kind") == "document_page":
+                normalized_citation["source_kind"] = "document"
+            citations.append(normalized_citation)
+        normalized["citations"] = citations
+    return normalized
+
+
+async def _request_comparison_pipeline(
+    pipeline: str,
+    payload: ComparisonStreamRequest,
+) -> dict[str, Any]:
+    if pipeline == "text_rag":
+        url = f"{RAGVLM_SERVICE_URL}/rag/text/answer"
+    elif pipeline == "multimodal_rag":
+        url = f"{MULTIMODAL_RAG_SERVICE_URL}/rag/multimodal/answer"
+    else:
+        raise ValueError(f"Unknown comparison pipeline: {pipeline}")
+
+    transcript_segments = (
+        [segment.model_dump() for segment in payload.transcript_window.segments]
+        if payload.transcript_window
+        else []
+    )
+    request_body: dict[str, Any] = {
+        "question": payload.question,
+        "document_ids": payload.document_ids,
+        "top_k": 5,
+        "conversation": _load_conversation(payload.session_id),
+        "video_title": payload.video_title,
+        "timestamp": payload.timestamp,
+        "frame_data_url": payload.frame_data_url,
+        "annotated_frame_data_url": payload.annotated_frame_data_url,
+        "annotations": payload.annotations,
+        "transcript_segments": transcript_segments,
+        "allow_model_knowledge": False,
+    }
+    if payload.model:
+        request_body["model"] = payload.model
+
+    timeout = _env_positive_float("RAG_COMPARISON_TIMEOUT_SECONDS", 120.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(url, json=request_body)
+    if response.status_code >= 400:
+        raise RuntimeError(f"Pipeline returned HTTP {response.status_code}: {response.text}")
+    return _comparison_answer_payload(response.json())
+
+
+@app.post("/chat/comparisons/stream")
+async def comparison_stream(payload: ComparisonStreamRequest) -> StreamingResponse:
+    if not payload.document_ids:
+        raise HTTPException(status_code=400, detail="Select at least one queryable PDF for comparison mode.")
+
+    comparison_id = str(uuid4())
+    mapping = _new_blinded_mapping(payload.session_id)
+    comparison_store.create(
+        comparison_id=comparison_id,
+        session_id=payload.session_id,
+        question=payload.question,
+        mapping=mapping,
+        request={
+            "document_ids": payload.document_ids,
+            "model": payload.model,
+            "video_id": payload.video_id,
+            "video_timestamp_seconds": payload.timestamp,
+        },
+        retry_of=payload.retry_of,
+    )
+    _record_chat_message(
+        session_id=payload.session_id,
+        exchange_id=comparison_id,
+        role="user",
+        content=payload.question,
+        status="received",
+        context={"comparison": True, "document_ids": payload.document_ids, "model": payload.model},
+    )
+
+    async def run_label(label: str) -> tuple[str, dict[str, Any]]:
+        pipeline = mapping[label]
+        try:
+            answer = await _request_comparison_pipeline(pipeline, payload)
+        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+            answer = _comparison_answer_payload(
+                {
+                    "status": "error",
+                    "text": "",
+                    "provenance": "insufficient",
+                    "error": str(exc),
+                }
+            )
+        comparison_store.record_answer(comparison_id, label=label, answer=answer)
+        return label, answer
+
+    async def stream() -> Any:
+        yield _sse(
+            json.dumps({"comparison_id": comparison_id}, separators=(",", ":")),
+            event="comparison_started",
+        )
+        tasks = {
+            asyncio.create_task(run_label(label)): label
+            for label in ("A", "B")
+        }
+        try:
+            for completed in asyncio.as_completed(tasks):
+                label, answer = await completed
+                if answer["status"] == "completed":
+                    if answer.get("text"):
+                        yield _sse(
+                            json.dumps(
+                                {
+                                    "comparison_id": comparison_id,
+                                    "label": label,
+                                    "delta": answer["text"],
+                                },
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                            event="answer_delta",
+                        )
+                    yield _sse(
+                        json.dumps(
+                            {
+                                "comparison_id": comparison_id,
+                                "label": label,
+                                "answer": answer,
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        event="answer_complete",
+                    )
+                else:
+                    yield _sse(
+                        json.dumps(
+                            {
+                                "comparison_id": comparison_id,
+                                "label": label,
+                                "error": answer.get("error") or "Pipeline unavailable.",
+                                "message": answer.get("error") or "Pipeline unavailable.",
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        event="answer_error",
+                    )
+            record = comparison_store.get(comparison_id)
+            yield _sse(
+                json.dumps(
+                    {"comparison_id": comparison_id, "status": record["status"]},
+                    separators=(",", ":"),
+                ),
+                event="comparison_complete",
+            )
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            raise
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.post("/chat/comparisons/{comparison_id}/reveal")
+async def reveal_comparison(comparison_id: str, payload: ComparisonRevealRequest) -> dict[str, Any]:
+    try:
+        before = comparison_store.get(comparison_id)
+        record = comparison_store.reveal(comparison_id, payload.selected_label)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Comparison not found.") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if not before["selected_label"]:
+        selected_answer = record["answers"].get(payload.selected_label, {})
+        _append_conversation(record["session_id"], record["question"], selected_answer.get("text", ""))
+        _record_chat_message(
+            session_id=record["session_id"],
+            exchange_id=comparison_id,
+            role="assistant",
+            content=selected_answer.get("text", ""),
+            status="completed",
+            context={
+                "comparison": True,
+                "selected_label": payload.selected_label,
+                "selected_pipeline": record["mapping"][payload.selected_label],
+                "mapping": record["mapping"],
+                "answers": record["answers"],
+            },
+        )
+    return {
+        "comparison_id": comparison_id,
+        "selected_label": record["selected_label"],
+        "mapping": record["mapping"],
+    }
 
 
 @app.post("/chat/stream")

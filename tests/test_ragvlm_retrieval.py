@@ -23,7 +23,7 @@ def test_chunk_text_overlaps_adjacent_chunks() -> None:
     assert chunks[1][-2:] == chunks[2][:2]
 
 
-def test_retrieve_chunks_includes_small_attached_documents_in_order(tmp_path: Path) -> None:
+def test_retrieve_chunks_ranks_small_attached_documents_by_relevance(tmp_path: Path) -> None:
     configure_document_dir(tmp_path)
     ingest_document_text(
         "Torque wrench calibration requires setting the lower valve before measurement.",
@@ -41,14 +41,14 @@ def test_retrieve_chunks_includes_small_attached_documents_in_order(tmp_path: Pa
     )
 
     chunks = retrieve_chunks(
-        "What documents are loaded?",
+        "How do I perform torque wrench calibration?",
         ["calibration", "cleaning"],
         top_k=2,
     )
 
     assert chunks[0]["document_id"] == "calibration"
     assert "Torque wrench calibration" in chunks[0]["text"]
-    assert chunks[0]["score"] == 1.0
+    assert chunks[0]["score"] > chunks[1]["score"]
 
 
 def test_retrieve_chunks_uses_embedding_similarity_without_scope(tmp_path: Path) -> None:

@@ -4,11 +4,24 @@ import { useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { AnnotationControls } from "@/components/AnnotationControls";
 import { AnnotationOverlay } from "@/components/AnnotationOverlay";
+import { ComparisonTurnCard } from "@/components/ComparisonTurnCard";
+import { ConvertedTextPreview } from "@/components/ConvertedTextPreview";
+import {
+  comparisonExportLines,
+  createComparisonTurn,
+  reduceComparisonEvent,
+  revealTurn,
+} from "@/lib/comparisonState";
+import { readComparisonSSE } from "@/lib/comparisonStream";
 import { parseModelResponse } from "@/lib/parseResponse";
 import { explicitlyRequestsTracking } from "@/lib/trackingIntent";
 import {
+  askComparison,
   askQuestion,
+  getConvertedTextDownloadUrl,
+  revealComparison,
   getMediaSourceUrl,
+  getDocumentStatus,
   getTranscriptWindow,
   getVideoMetadata,
   ingestYoutubeUrl,
@@ -20,6 +33,8 @@ import type {
   Annotation,
   AnnotationUndoEntry,
   AnnotationType,
+  AnswerLabel,
+  ComparisonTurn,
   TrackingOverlay,
   TranscriptWindowResponse,
 } from "@/lib/types";
@@ -33,12 +48,15 @@ interface ChatMessage {
   model?: string;
   documents?: string[];
   annotatedSnapshot?: boolean;
+  comparison?: ComparisonTurn;
+  comparisonQuestion?: string;
 }
 
 interface UploadedDocument {
   id: string;
   filename: string;
   chunkCount: number;
+  comparisonEligible: boolean;
 }
 
 const RAGVLM_MODELS = [
@@ -253,6 +271,8 @@ export default function Home() {
   const [documentUploading, setDocumentUploading] = useState(false);
   const [documentStatus, setDocumentStatus] = useState("");
   const [documentError, setDocumentError] = useState("");
+  const [previewDocument, setPreviewDocument] = useState<UploadedDocument | null>(null);
+  const [revealingComparisonId, setRevealingComparisonId] = useState("");
   const [loading, setLoading] = useState(false);
   const [ingesting, setIngesting] = useState(false);
   const [ingestError, setIngestError] = useState("");
@@ -295,6 +315,17 @@ export default function Home() {
     if (Math.abs(nearestTimestamp - timestamp) > 0.1) return [];
     return trackingOverlays.filter((overlay) => Math.abs(overlay.timestamp - nearestTimestamp) < 0.0001);
   }, [trackingOverlays, timestamp]);
+  const selectedComparisonDocumentIds = useMemo(
+    () =>
+      documents
+        .filter(
+          (document) =>
+            document.comparisonEligible &&
+            selectedDocumentIds.includes(document.id)
+        )
+        .map((document) => document.id),
+    [documents, selectedDocumentIds]
+  );
 
   function closeTrackingEventSource() {
     const source = trackingEventSourceRef.current as EventSource | null;
@@ -338,6 +369,9 @@ export default function Home() {
       `- Video: ${videoTitle || videoId || "Unknown"}`,
       "",
       ...chatMessages.flatMap((message) => {
+        if (message.comparison) {
+          return comparisonExportLines(message.comparison);
+        }
         const details = [
           message.model ? `Model: ${message.model}` : "",
           message.documents?.length ? `RAG documents: ${message.documents.join(", ")}` : "",
@@ -583,13 +617,42 @@ export default function Home() {
           id: result.document_id,
           filename: result.filename,
           chunkCount: result.chunk_count,
+          comparisonEligible: file.name.toLowerCase().endsWith(".pdf"),
         };
         return [...current.filter((document) => document.id !== result.document_id), nextDocument];
       });
+      const isPdf = file.name.toLowerCase().endsWith(".pdf");
+      if (isPdf) {
+        setDocumentStatus(`Processing both RAG indexes for ${result.filename}...`);
+        let status = await getDocumentStatus(result.document_id);
+        for (let attempt = 0; status.status === "processing" && attempt < 300; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 1000));
+          status = await getDocumentStatus(result.document_id);
+        }
+        if (status.status !== "queryable") {
+          const details = Object.entries(status.pipelines)
+            .filter(([, pipeline]) => pipeline.error)
+            .map(([name, pipeline]) => `${name}: ${pipeline.error}`)
+            .join("; ");
+          throw new Error(
+            details || "The PDF did not become queryable in both RAG pipelines."
+          );
+        }
+        const chunkCount = status.pipelines.text_rag?.chunk_count ?? result.chunk_count;
+        setDocuments((current) =>
+          current.map((document) =>
+            document.id === result.document_id
+              ? { ...document, chunkCount }
+              : document
+          )
+        );
+      }
       setSelectedDocumentIds((current) =>
         current.includes(result.document_id) ? current : [...current, result.document_id]
       );
-      setDocumentStatus(`Attached ${result.filename} (${result.chunk_count} chunks).`);
+      setDocumentStatus(
+        `Attached ${result.filename}${isPdf ? " — both RAG pipelines ready" : ` (${result.chunk_count} chunks)`}.`
+      );
     } catch (error) {
       setDocumentError(errorMessage(error));
       setDocumentStatus("");
@@ -672,7 +735,9 @@ export default function Home() {
   async function handleAsk(event: FormEvent) {
     event.preventDefault();
     const trimmedQuestion = question.trim();
-    if (!videoId || !videoMetadataLoaded || !trimmedQuestion) return;
+    const comparisonMode = selectedComparisonDocumentIds.length > 0;
+    const videoReady = Boolean(videoId && videoMetadataLoaded);
+    if ((!videoReady && !comparisonMode) || !trimmedQuestion) return;
     const sourceTimestamp = timestamp + videoTimeOffset;
     setLoading(true);
     const attachedDocuments = documents
@@ -695,9 +760,11 @@ export default function Home() {
       {
         id: assistantMessageId,
         role: "assistant",
-        content: "Thinking...",
+        content: comparisonMode ? "" : "Thinking...",
         createdAt,
         model: selectedModel,
+        comparison: comparisonMode ? createComparisonTurn() : undefined,
+        comparisonQuestion: comparisonMode ? trimmedQuestion : undefined,
       },
     ]);
     setQuestion("");
@@ -706,6 +773,11 @@ export default function Home() {
     setActiveTrackingJobId("");
     setTrackingStatus("");
     setTrackingError("");
+
+    if (comparisonMode) {
+      await runComparison(assistantMessageId, trimmedQuestion, includeAnnotatedSnapshot);
+      return;
+    }
 
     try {
       const frameData = await captureFrame();
@@ -927,8 +999,148 @@ export default function Home() {
     }
   }
 
+  async function runComparison(
+    assistantMessageId: string,
+    trimmedQuestion: string,
+    includeAnnotatedSnapshot: boolean,
+    retryOf?: string
+  ) {
+    setLoading(true);
+    try {
+      const videoReady = Boolean(videoId && videoMetadataLoaded);
+      const sourceTimestamp = timestamp + videoTimeOffset;
+      const frameData = videoReady ? await captureFrame() : undefined;
+      const annotatedFrameData =
+        videoReady && includeAnnotatedSnapshot ? await captureAnnotatedFrame() : undefined;
+      const transcript = videoReady
+        ? await loadTranscriptWindow(videoId, sourceTimestamp)
+        : undefined;
+      const response = await askComparison({
+        session_id: sessionId,
+        video_id: videoReady ? videoId : undefined,
+        video_title: videoReady ? videoTitle || undefined : undefined,
+        timestamp: videoReady ? sourceTimestamp : undefined,
+        frame_data_url: frameData,
+        annotated_frame_data_url: annotatedFrameData,
+        question: trimmedQuestion,
+        annotations,
+        transcript_window: transcript,
+        document_ids: selectedComparisonDocumentIds,
+        model: selectedModel,
+        retry_of: retryOf,
+      });
+      if (!response.ok) throw new Error(await response.text());
+      await readComparisonSSE(response, (streamEvent) => {
+        setChatMessages((current) =>
+          current.map((message) =>
+            message.id === assistantMessageId && message.comparison
+              ? { ...message, comparison: reduceComparisonEvent(message.comparison, streamEvent) }
+              : message
+          )
+        );
+      });
+    } catch (error) {
+      const errorText = errorMessage(error);
+      setChatMessages((current) =>
+        current.map((message) =>
+          message.id === assistantMessageId && message.comparison
+            ? {
+                ...message,
+                comparison: {
+                  ...message.comparison,
+                  status: "error",
+                  retryable: true,
+                  answers: {
+                    A:
+                      message.comparison.answers.A.status === "complete"
+                        ? message.comparison.answers.A
+                        : { ...message.comparison.answers.A, status: "error", error: errorText },
+                    B:
+                      message.comparison.answers.B.status === "complete"
+                        ? message.comparison.answers.B
+                        : { ...message.comparison.answers.B, status: "error", error: errorText },
+                  },
+                },
+              }
+            : message
+        )
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function selectComparisonAnswer(messageId: string, label: AnswerLabel) {
+    setChatMessages((current) =>
+      current.map((message) =>
+        message.id === messageId && message.comparison && !message.comparison.revealed
+          ? { ...message, comparison: { ...message.comparison, selected_label: label } }
+          : message
+      )
+    );
+  }
+
+  async function revealComparisonAnswer(messageId: string) {
+    const message = chatMessages.find((item) => item.id === messageId);
+    const turn = message?.comparison;
+    if (!turn?.comparison_id || !turn.selected_label || turn.revealed) return;
+    setRevealingComparisonId(messageId);
+    try {
+      const result = await revealComparison(turn.comparison_id, turn.selected_label);
+      const selectedAnswer = turn.answers[turn.selected_label];
+      setChatMessages((current) =>
+        current.map((item) =>
+          item.id === messageId && item.comparison
+            ? { ...item, comparison: revealTurn(item.comparison, result.mapping) }
+            : item
+        )
+      );
+      if (selectedAnswer.annotations.length) {
+        setModelAnnotations(
+          selectedAnswer.annotations.map((annotation) => ({
+            ...shiftAnnotationDown(annotation, Math.round(1000 / 32)),
+            fontSize: annotation.fontSize ?? 1,
+            strokeWidth: annotation.strokeWidth ?? 3,
+          }))
+        );
+      } else {
+        setModelAnnotations([]);
+      }
+    } catch (error) {
+      setChatMessages((current) =>
+        current.map((item) =>
+          item.id === messageId && item.comparison
+            ? {
+                ...item,
+                comparison: { ...item.comparison, reveal_error: errorMessage(error) },
+              }
+            : item
+        )
+      );
+    } finally {
+      setRevealingComparisonId("");
+    }
+  }
+
+  async function retryComparison(messageId: string) {
+    const message = chatMessages.find((item) => item.id === messageId);
+    if (!message?.comparisonQuestion || loading) return;
+    const retryOf = message.comparison?.comparison_id;
+    setChatMessages((current) =>
+      current.map((item) =>
+        item.id === messageId ? { ...item, comparison: createComparisonTurn() } : item
+      )
+    );
+    await runComparison(messageId, message.comparisonQuestion, false, retryOf);
+  }
+
   const selectedModelLabel =
     RAGVLM_MODELS.find((model) => model.value === selectedModel)?.label ?? selectedModel;
+  const hasUnrevealedCompletedComparison = chatMessages.some(
+    (message) =>
+      message.comparison?.status === "complete" &&
+      !message.comparison.revealed
+  );
 
   return (
     <div className="op-shell">
@@ -1240,17 +1452,35 @@ export default function Home() {
             {documents.length ? (
               <div className="op-document-list">
                 {documents.map((document) => (
-                  <label key={document.id} className="op-document-item">
-                    <input
-                      type="checkbox"
-                      checked={selectedDocumentIds.includes(document.id)}
-                      onChange={() => toggleDocumentSelection(document.id)}
-                    />
-                    <span>
-                      {document.filename}
-                      <div className="op-document-meta">{document.chunkCount} chunks</div>
-                    </span>
-                  </label>
+                  <div key={document.id} className="op-document-item">
+                    <label className="op-document-selector">
+                      <input
+                        type="checkbox"
+                        checked={selectedDocumentIds.includes(document.id)}
+                        onChange={() => toggleDocumentSelection(document.id)}
+                      />
+                      <span>
+                        {document.filename}
+                        <span className="op-document-meta">{document.chunkCount} chunks</span>
+                      </span>
+                    </label>
+                    <div className="op-document-actions">
+                      <button
+                        type="button"
+                        className="op-document-action"
+                        onClick={() => setPreviewDocument(document)}
+                      >
+                        Preview text
+                      </button>
+                      <a
+                        className="op-document-action"
+                        href={getConvertedTextDownloadUrl(document.id)}
+                        download
+                      >
+                        Download
+                      </a>
+                    </div>
+                  </div>
                 ))}
               </div>
             ) : null}
@@ -1307,30 +1537,43 @@ export default function Home() {
             <div className="op-chat-panel">
               <div className="op-chat-history">
                 {chatMessages.length ? (
-                  chatMessages.map((message) => (
-                    <div
-                      key={message.id}
-                      className={`op-chat-bubble ${
-                        message.role === "user"
-                          ? "op-chat-bubble-user"
-                          : message.error
-                            ? "op-chat-bubble-error"
-                            : "op-chat-bubble-assistant"
-                      }`}
-                    >
-                      <div className="op-chat-meta">
-                        {message.role === "user" ? "User" : "Operator OS"}
-                        {message.model ? ` · ${message.model}` : ""}
-                        {message.documents?.length ? ` · RAG: ${message.documents.join(", ")}` : ""}
-                        {message.role === "user"
-                          ? ` · snapshot ${message.annotatedSnapshot ? "sent" : "not sent"}`
-                          : ""}
+                  chatMessages.map((message) =>
+                    message.comparison ? (
+                      <ComparisonTurnCard
+                        key={message.id}
+                        turn={message.comparison}
+                        revealing={revealingComparisonId === message.id}
+                        onSelect={(label) => selectComparisonAnswer(message.id, label)}
+                        onReveal={() => void revealComparisonAnswer(message.id)}
+                        onRetry={() => void retryComparison(message.id)}
+                      />
+                    ) : (
+                      <div
+                        key={message.id}
+                        className={`op-chat-bubble ${
+                          message.role === "user"
+                            ? "op-chat-bubble-user"
+                            : message.error
+                              ? "op-chat-bubble-error"
+                              : "op-chat-bubble-assistant"
+                        }`}
+                      >
+                        <div className="op-chat-meta">
+                          {message.role === "user" ? "User" : "Operator OS"}
+                          {message.model ? ` · ${message.model}` : ""}
+                          {message.documents?.length ? ` · RAG: ${message.documents.join(", ")}` : ""}
+                          {message.role === "user"
+                            ? ` · snapshot ${message.annotatedSnapshot ? "sent" : "not sent"}`
+                            : ""}
+                        </div>
+                        {message.content}
                       </div>
-                      {message.content}
-                    </div>
-                  ))
+                    )
+                  )
                 ) : (
-                  <p className="op-chat-empty">Ask anything about the paused frame to start a conversation.</p>
+                  <p className="op-chat-empty">
+                    Ask about the paused frame or a selected document to start a conversation.
+                  </p>
                 )}
               </div>
 
@@ -1347,7 +1590,12 @@ export default function Home() {
                     type="submit"
                     className="op-send-button"
                     aria-label={loading ? "Sending question" : "Send question"}
-                    disabled={loading || ingesting || !videoId || !videoMetadataLoaded}
+                    disabled={
+                      loading ||
+                      ingesting ||
+                      hasUnrevealedCompletedComparison ||
+                      (!selectedComparisonDocumentIds.length && (!videoId || !videoMetadataLoaded))
+                    }
                   >
                     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
                       <path
@@ -1364,6 +1612,13 @@ export default function Home() {
           </div>
         </aside>
       </div>
+      {previewDocument ? (
+        <ConvertedTextPreview
+          documentId={previewDocument.id}
+          filename={previewDocument.filename}
+          onClose={() => setPreviewDocument(null)}
+        />
+      ) : null}
     </div>
   );
 }
