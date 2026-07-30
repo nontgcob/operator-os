@@ -75,6 +75,10 @@ def _metadata_path(video_id: str) -> Path:
     return _video_dir(video_id) / "metadata.json"
 
 
+def _ingest_error_path(video_id: str) -> Path:
+    return _video_dir(video_id) / "ingest_error.json"
+
+
 def _title_from_upload_filename(filename: str | None) -> str:
     if not filename:
         return "Uploaded video"
@@ -283,6 +287,8 @@ def _env_list(name: str, default: str = "") -> list[str]:
 
 
 def _configured_js_runtimes() -> list[str]:
+    if "YTDLP_JS_RUNTIME" in os.environ:
+        return _env_list("YTDLP_JS_RUNTIME")
     return _env_list("YTDLP_JS_RUNTIME", DEFAULT_YTDLP_JS_RUNTIME)
 
 
@@ -397,6 +403,39 @@ def _build_ytdlp_command(youtube_url: str, output_path: Path) -> list[str]:
     command.append("--write-info-json")
     command.extend(["-o", str(_ytdlp_output_template(output_path)), youtube_url])
     return command
+
+
+def _redact_ytdlp_command(command: list[str]) -> list[str]:
+    redacted: list[str] = []
+    redact_next = False
+    sensitive_options = {"--cookies", "--user-agent"}
+    for value in command:
+        if redact_next:
+            redacted.append("<redacted>")
+            redact_next = False
+            continue
+        redacted.append(value)
+        if value in sensitive_options:
+            redact_next = True
+    return redacted
+
+
+def _write_ingest_error(video_id: str, *, command: list[str], detail: str) -> None:
+    payload = {
+        "video_id": video_id,
+        "command": _redact_ytdlp_command(command),
+        "detail": _trim_ytdlp_output(detail),
+    }
+    _ingest_error_path(video_id).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _cleanup_empty_video_dir(video_id: str) -> None:
+    video_dir = BASE_DIR / video_id
+    try:
+        if video_dir.is_dir() and not any(video_dir.iterdir()):
+            video_dir.rmdir()
+    except OSError:
+        return
 
 
 def _normalize_downloaded_source(source_path: Path) -> None:
@@ -687,16 +726,19 @@ async def ingest_media(
         source_label = file.filename
     elif youtube_url:
         source_path = _source_path(video_id)
+        command = _build_ytdlp_command(youtube_url, source_path)
         result = subprocess.run(
-            _build_ytdlp_command(youtube_url, source_path),
+            command,
             capture_output=True,
             text=True,
             check=False,
         )
         if result.returncode != 0:
+            detail = _format_ytdlp_error(result.stderr or result.stdout)
+            _write_ingest_error(video_id, command=command, detail=detail)
             raise HTTPException(
                 status_code=400,
-                detail=_format_ytdlp_error(result.stderr or result.stdout),
+                detail=detail,
             )
         _normalize_downloaded_source(source_path)
         _ensure_playable_mp4(source_path)
@@ -704,6 +746,7 @@ async def ingest_media(
         source = "youtube"
         source_label = youtube_url
     else:
+        _cleanup_empty_video_dir(video_id)
         raise HTTPException(status_code=400, detail="No input media provided")
 
     _extract_transcript(video_id, source_path)

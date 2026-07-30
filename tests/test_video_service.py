@@ -378,6 +378,16 @@ def test_build_ytdlp_command_includes_cookie_free_youtube_options(tmp_path: Path
     ]
 
 
+def test_build_ytdlp_command_allows_blank_js_runtime_for_local_dev(tmp_path: Path, monkeypatch) -> None:
+    module = _load_video_module()
+    _clear_ytdlp_env(monkeypatch)
+    monkeypatch.setenv("YTDLP_JS_RUNTIME", "")
+
+    command = module._build_ytdlp_command("https://youtu.be/abc123", tmp_path / "source.mp4")
+
+    assert "--js-runtimes" not in command
+
+
 def test_build_ytdlp_command_rejects_invalid_po_token_options(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -414,6 +424,39 @@ def test_ingest_media_explains_cookie_required_error(tmp_path: Path, monkeypatch
     assert response.status_code == 400
     assert "requires cookies" in response.json()["detail"]
     assert "./data/ytdlp/cookies.txt" in response.json()["detail"]
+
+
+def test_ingest_media_records_sanitized_ytdlp_failure(tmp_path: Path, monkeypatch) -> None:
+    module = _load_video_module()
+    module.BASE_DIR = tmp_path
+    module.BASE_DIR.mkdir(parents=True, exist_ok=True)
+    _clear_ytdlp_env(monkeypatch)
+    cookies_path = tmp_path / "cookies.txt"
+    cookies_path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    monkeypatch.setenv("YTDLP_COOKIES_FILE", str(cookies_path))
+    monkeypatch.setenv("YTDLP_USER_AGENT", "secret agent")
+    monkeypatch.setattr(module, "uuid4", lambda: "video-ytdlp-failed")
+
+    class DownloadResult:
+        returncode = 1
+        stdout = ""
+        stderr = "ERROR: HTTP Error 429: Too Many Requests"
+
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: DownloadResult())
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/media/ingest",
+        json={"youtube_url": "https://www.youtube.com/watch?v=abc123"},
+    )
+
+    assert response.status_code == 400
+    error_payload = json.loads((tmp_path / "video-ytdlp-failed" / "ingest_error.json").read_text())
+    assert error_payload["video_id"] == "video-ytdlp-failed"
+    assert error_payload["command"][error_payload["command"].index("--cookies") + 1] == "<redacted>"
+    assert error_payload["command"][error_payload["command"].index("--user-agent") + 1] == "<redacted>"
+    assert "secret agent" not in json.dumps(error_payload)
+    assert "Too Many Requests" in error_payload["detail"]
 
 
 def test_format_ytdlp_error_explains_js_runtime() -> None:
