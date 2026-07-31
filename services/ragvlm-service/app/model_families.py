@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-DEFAULT_MODEL = "qwen/qwen3-vl-8b-instruct"
+DEFAULT_MODEL = "google/gemini-3.1-pro-preview"
 
 MODEL_FAMILIES = {
     "gemini": {

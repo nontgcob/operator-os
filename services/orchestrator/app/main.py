@@ -47,7 +47,6 @@ app.add_middleware(
 )
 
 RAGVLM_SERVICE_URL = os.getenv("RAGVLM_SERVICE_URL", "http://localhost:8001")
-MULTIMODAL_RAG_SERVICE_URL = os.getenv("MULTIMODAL_RAG_SERVICE_URL", "http://localhost:8004")
 VIDEO_SERVICE_URL = os.getenv("VIDEO_SERVICE_URL", "http://localhost:8002")
 SAM3_SERVICE_URL = os.getenv("SAM3_SERVICE_URL", "http://localhost:8003")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -252,29 +251,6 @@ def _enqueue_tracking_job(job_payload: dict[str, Any]) -> None:
     )
 
 
-async def _retrieve_document_chunks(
-    client: httpx.AsyncClient,
-    document_ids: list[str],
-    question: str,
-    *,
-    top_k: int = 4,
-) -> list[str]:
-    if not document_ids:
-        return []
-    response = await client.post(
-        f"{RAGVLM_SERVICE_URL}/documents/retrieve",
-        json={"question": question, "document_ids": document_ids, "top_k": top_k},
-    )
-    if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
-    chunks = response.json().get("chunks", [])
-    return [
-        chunk["text"]
-        for chunk in chunks
-        if isinstance(chunk, dict) and isinstance(chunk.get("text"), str) and chunk["text"]
-    ]
-
-
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -402,59 +378,25 @@ async def document_ingest(
     ).hexdigest()[:16]
     params = {"document_id": resolved_document_id}
 
-    async def ingest_into(url: str) -> httpx.Response:
-        payload = {"file": (filename, data, file.content_type)}
-        async with httpx.AsyncClient(timeout=300) as client:
-            return await client.post(url, files=payload, params=params)
+    payload = {"file": (filename, data, file.content_type)}
+    async with httpx.AsyncClient(timeout=300) as client:
+        response = await client.post(
+            f"{RAGVLM_SERVICE_URL}/documents/ingest",
+            files=payload,
+            params=params,
+        )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
 
-    text_task = asyncio.create_task(ingest_into(f"{RAGVLM_SERVICE_URL}/documents/ingest"))
-    multimodal_task = asyncio.create_task(
-        ingest_into(f"{MULTIMODAL_RAG_SERVICE_URL}/documents/ingest")
-    )
-    text_response, multimodal_result = await asyncio.gather(
-        text_task,
-        multimodal_task,
-        return_exceptions=True,
-    )
-    if isinstance(text_response, Exception):
-        raise HTTPException(status_code=502, detail=f"Text RAG ingestion failed: {text_response}")
-    if text_response.status_code >= 400:
-        raise HTTPException(status_code=text_response.status_code, detail=text_response.text)
-
-    result = dict(text_response.json())
+    result = dict(response.json())
     result["document_id"] = resolved_document_id
     result.setdefault("filename", filename)
-    result["pipelines"] = {
-        "text_rag": {
-            "status": result.get("status", "queryable"),
-        },
-        "multimodal_rag": {"status": "processing"},
-    }
-    if isinstance(multimodal_result, Exception):
-        result["pipelines"]["multimodal_rag"] = {
-            "status": "error",
-            "error": str(multimodal_result),
-        }
-    elif multimodal_result.status_code >= 400:
-        result["pipelines"]["multimodal_rag"] = {
-            "status": "error",
-            "error": multimodal_result.text,
-        }
-    else:
-        multimodal_payload = multimodal_result.json()
-        result["pipelines"]["multimodal_rag"] = {
-            "status": multimodal_payload.get("status", "queryable"),
-            **{
-                key: value
-                for key, value in multimodal_payload.items()
-                if key not in {"document_id", "filename", "status"}
-            },
-        }
+    result["pipelines"] = {"direct_pdf_vlm": {"status": result.get("status", "queryable")}}
     _log_event(
         "document_ingested",
         filename=filename,
         document_id=resolved_document_id,
-        multimodal_status=result["pipelines"]["multimodal_rag"]["status"],
+        document_status=result["pipelines"]["direct_pdf_vlm"]["status"],
     )
     return result
 
@@ -470,81 +412,43 @@ async def _get_pipeline_status(url: str) -> dict[str, Any]:
         return {"status": "error", "error": str(exc)}
 
 
-def _is_text_rag_queryable(status: dict[str, Any]) -> bool:
+def _is_document_queryable(status: dict[str, Any]) -> bool:
     raw_status = status.get("status")
     if raw_status in {"ready", "queryable", "complete", "completed"}:
         return True
-    return raw_status == "partial" and int(status.get("chunk_count") or 0) > 0
-
-
-def _is_multimodal_rag_queryable(status: dict[str, Any]) -> bool:
-    raw_status = status.get("status")
-    if raw_status in {"ready", "queryable", "complete", "completed"}:
-        return True
-    if raw_status != "partial":
-        return False
-    return int(status.get("page_count") or 0) > 0 and bool(status.get("version"))
+    return False
 
 
 @app.get("/documents/{document_id}/status")
 async def document_status(document_id: str) -> dict[str, Any]:
-    text_status, multimodal_status = await asyncio.gather(
-        _get_pipeline_status(f"{RAGVLM_SERVICE_URL}/documents/{document_id}/status"),
-        _get_pipeline_status(f"{MULTIMODAL_RAG_SERVICE_URL}/documents/{document_id}/status"),
+    document_status_payload = await _get_pipeline_status(
+        f"{RAGVLM_SERVICE_URL}/documents/{document_id}/status"
     )
-    normalized_statuses = {
-        "text_rag": (
-            "queryable"
-            if _is_text_rag_queryable(text_status)
-            else text_status.get("status")
-        ),
-        "multimodal_rag": (
-            "queryable"
-            if _is_multimodal_rag_queryable(multimodal_status)
-            else multimodal_status.get("status")
-        ),
-    }
+    normalized_status = (
+        "queryable"
+        if _is_document_queryable(document_status_payload)
+        else document_status_payload.get("status")
+    )
     return {
         "document_id": document_id,
-        "status": (
-            "queryable"
-            if set(normalized_statuses.values()) == {"queryable"}
-            else "processing"
-            if "processing" in normalized_statuses.values()
-            else "partial"
-        ),
+        "status": normalized_status,
         "pipelines": {
-            "text_rag": {**text_status, "status": normalized_statuses["text_rag"]},
-            "multimodal_rag": {
-                **multimodal_status,
-                "status": normalized_statuses["multimodal_rag"],
-            },
+            "direct_pdf_vlm": {**document_status_payload, "status": normalized_status},
         },
     }
 
 
 @app.post("/documents/{document_id}/reprocess")
 async def reprocess_document(document_id: str) -> dict[str, Any]:
-    async def reprocess(url: str) -> dict[str, Any]:
-        try:
-            async with httpx.AsyncClient(timeout=300) as client:
-                response = await client.post(url)
-            if response.status_code >= 400:
-                return {"status": "error", "error": response.text}
-            return response.json()
-        except httpx.HTTPError as exc:
-            return {"status": "error", "error": str(exc)}
-
-    text_result, multimodal_result = await asyncio.gather(
-        reprocess(f"{RAGVLM_SERVICE_URL}/documents/{document_id}/reprocess"),
-        reprocess(f"{MULTIMODAL_RAG_SERVICE_URL}/documents/{document_id}/reprocess"),
-    )
+    try:
+        async with httpx.AsyncClient(timeout=300) as client:
+            response = await client.post(f"{RAGVLM_SERVICE_URL}/documents/{document_id}/reprocess")
+        result = response.json() if response.status_code < 400 else {"status": "error", "error": response.text}
+    except httpx.HTTPError as exc:
+        result = {"status": "error", "error": str(exc)}
     return {
         "document_id": document_id,
-        "pipelines": {
-            "text_rag": text_result,
-            "multimodal_rag": multimodal_result,
-        },
+        "pipelines": {"direct_pdf_vlm": result},
     }
 
 
@@ -578,15 +482,7 @@ async def download_converted_text(document_id: str) -> Response:
 
 @app.post("/documents/retrieve")
 async def document_retrieve(payload: DocumentRetrieveRequest) -> Any:
-    async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.post(
-            f"{RAGVLM_SERVICE_URL}/documents/retrieve",
-            json=payload.model_dump(),
-        )
-    if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
-    _log_event("document_retrieved", document_count=len(payload.document_ids), question_len=len(payload.question))
-    return response.json()
+    raise HTTPException(status_code=410, detail="Document retrieval was removed; PDFs are sent directly to the VLM.")
 
 
 def _new_blinded_mapping(session_id: str) -> dict[str, str]:
@@ -654,12 +550,7 @@ async def _request_comparison_pipeline(
     pipeline: str,
     payload: ComparisonStreamRequest,
 ) -> dict[str, Any]:
-    if pipeline == "text_rag":
-        url = f"{RAGVLM_SERVICE_URL}/rag/text/answer"
-    elif pipeline == "multimodal_rag":
-        url = f"{MULTIMODAL_RAG_SERVICE_URL}/rag/multimodal/answer"
-    else:
-        raise ValueError(f"Unknown comparison pipeline: {pipeline}")
+    raise RuntimeError("Legacy RAG comparison pipelines were removed.")
 
     transcript_segments = (
         [segment.model_dump() for segment in payload.transcript_window.segments]
@@ -692,8 +583,10 @@ async def _request_comparison_pipeline(
 
 @app.post("/chat/comparisons/stream")
 async def comparison_stream(payload: ComparisonStreamRequest) -> StreamingResponse:
-    if not payload.document_ids:
-        raise HTTPException(status_code=400, detail="Select at least one queryable PDF for comparison mode.")
+    raise HTTPException(
+        status_code=410,
+        detail="Blind text-vs-multimodal RAG comparison was removed with the legacy RAG pipelines.",
+    )
 
     comparison_id = str(uuid4())
     mapping = _new_blinded_mapping(payload.session_id)
@@ -858,35 +751,6 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
         context=chat_context,
     )
     _log_event("inference_started", session_id=payload.session_id, video_id=payload.video_id, timestamp=payload.timestamp)
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            retrieved_chunks = await _retrieve_document_chunks(
-                client,
-                payload.document_ids,
-                payload.question,
-            )
-    except HTTPException as exc:
-        message = f"Document retrieval failed: {exc.detail}"
-        _record_chat_message(
-            session_id=payload.session_id,
-            exchange_id=exchange_id,
-            role="assistant",
-            content=message,
-            status="error",
-            context={"model": payload.model},
-        )
-        raise
-    except httpx.HTTPError as exc:
-        message = f"Document retrieval failed: {exc}"
-        _record_chat_message(
-            session_id=payload.session_id,
-            exchange_id=exchange_id,
-            role="assistant",
-            content=message,
-            status="error",
-            context={"model": payload.model},
-        )
-        raise HTTPException(status_code=502, detail=message) from exc
     request_body = {
         "question": payload.question,
         "video_title": payload.video_title,
@@ -894,7 +758,7 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
         "annotated_frame_data_url": payload.annotated_frame_data_url,
         "annotations": payload.annotations,
         "transcript_segments": [segment.model_dump() for segment in payload.transcript_window.segments],
-        "retrieved_chunks": retrieved_chunks,
+        "document_ids": payload.document_ids,
         "conversation": _load_conversation(payload.session_id),
     }
     if payload.model:

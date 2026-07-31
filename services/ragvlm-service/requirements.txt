@@ -3,6 +3,3 @@ uvicorn[standard]
 httpx
 pydantic
 python-multipart
-pypdf
-python-docx
-PyMuPDF

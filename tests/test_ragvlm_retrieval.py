@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import sys
 from pathlib import Path
 
@@ -9,76 +10,46 @@ sys.path.append(str(RAGVLM_APP_PATH))
 from rag.retrieval import (  # type: ignore  # noqa: E402
     chunk_text,
     configure_document_dir,
-    ingest_document_text,
+    get_document_file_content_parts,
+    get_document_status,
+    ingest_document_bytes,
     retrieve_chunks,
 )
 
 
-def test_chunk_text_overlaps_adjacent_chunks() -> None:
-    text = "abcdefghij" "klmnopqrst" "uvwxyz"
-    chunks = chunk_text(text, chunk_size=10, overlap=2)
+def test_chunk_text_compatibility_helper_still_overlaps_adjacent_chunks() -> None:
+    chunks = chunk_text("abcdefghijklmnopqrstuvwxyz", chunk_size=10, overlap=2)
 
     assert len(chunks) == 3
     assert chunks[0][-2:] == chunks[1][:2]
     assert chunks[1][-2:] == chunks[2][:2]
 
 
-def test_retrieve_chunks_ranks_small_attached_documents_by_relevance(tmp_path: Path) -> None:
+def test_pdf_ingest_stores_original_for_direct_vlm_use(tmp_path: Path) -> None:
     configure_document_dir(tmp_path)
-    ingest_document_text(
-        "Torque wrench calibration requires setting the lower valve before measurement.",
-        filename="calibration.txt",
-        document_id="calibration",
-        chunk_size=80,
-        overlap=2,
+    data = b"%PDF-1.4\nfixture"
+
+    result = ingest_document_bytes(
+        data,
+        filename="manual.pdf",
+        content_type="application/pdf",
+        document_id="manual",
     )
-    ingest_document_text(
-        "General cleaning procedure covers gloves and surface wipe down.",
-        filename="cleaning.txt",
-        document_id="cleaning",
-        chunk_size=80,
-        overlap=2,
-    )
+    status = get_document_status("manual")
+    parts = get_document_file_content_parts(["manual"])
 
-    chunks = retrieve_chunks(
-        "How do I perform torque wrench calibration?",
-        ["calibration", "cleaning"],
-        top_k=2,
-    )
-
-    assert chunks[0]["document_id"] == "calibration"
-    assert "Torque wrench calibration" in chunks[0]["text"]
-    assert chunks[0]["score"] > chunks[1]["score"]
-
-
-def test_retrieve_chunks_uses_embedding_similarity_without_scope(tmp_path: Path) -> None:
-    configure_document_dir(tmp_path)
-
-    def embedder(texts: list[str]) -> list[list[float]]:
-        vectors = {
-            "Torque wrench calibration requires setting the lower valve before measurement.": [1.0, 0.0],
-            "General cleaning procedure covers gloves and surface wipe down.": [0.0, 1.0],
+    assert result["status"] == "queryable"
+    assert result["chunk_count"] == 0
+    assert result["interaction_mode"] == "direct_pdf_vlm"
+    assert status["converted_text_available"] is False
+    assert status["original_available"] is True
+    assert retrieve_chunks("anything", ["manual"]) == []
+    assert parts == [
+        {
+            "type": "file",
+            "file": {
+                "filename": "manual.pdf",
+                "file_data": f"data:application/pdf;base64,{base64.b64encode(data).decode('ascii')}",
+            },
         }
-        return [vectors[text] for text in texts]
-
-    ingest_document_text(
-        "Torque wrench calibration requires setting the lower valve before measurement.",
-        filename="calibration.txt",
-        document_id="calibration",
-        embedder=embedder,
-    )
-    ingest_document_text(
-        "General cleaning procedure covers gloves and surface wipe down.",
-        filename="cleaning.txt",
-        document_id="cleaning",
-        embedder=embedder,
-    )
-
-    chunks = retrieve_chunks(
-        "How should I calibrate the torque wrench?",
-        top_k=2,
-        query_embedder=lambda texts: [[1.0, 0.0] for _ in texts],
-    )
-
-    assert chunks[0]["document_id"] == "calibration"
-    assert chunks[0]["score"] > chunks[1]["score"]
+    ]

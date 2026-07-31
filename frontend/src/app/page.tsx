@@ -5,7 +5,6 @@ import type { FormEvent } from "react";
 import { AnnotationControls } from "@/components/AnnotationControls";
 import { AnnotationOverlay } from "@/components/AnnotationOverlay";
 import { ComparisonTurnCard } from "@/components/ComparisonTurnCard";
-import { ConvertedTextPreview } from "@/components/ConvertedTextPreview";
 import {
   comparisonExportLines,
   createComparisonTurn,
@@ -18,7 +17,6 @@ import { explicitlyRequestsTracking } from "@/lib/trackingIntent";
 import {
   askComparison,
   askQuestion,
-  getConvertedTextDownloadUrl,
   revealComparison,
   getMediaSourceUrl,
   getDocumentStatus,
@@ -56,7 +54,6 @@ interface UploadedDocument {
   id: string;
   filename: string;
   chunkCount: number;
-  comparisonEligible: boolean;
 }
 
 const RAGVLM_MODELS = [
@@ -92,7 +89,7 @@ const RAGVLM_MODELS = [
   },
 ];
 
-const DEFAULT_RAGVLM_MODEL = "qwen/qwen3-vl-8b-instruct";
+const DEFAULT_RAGVLM_MODEL = "google/gemini-3.1-pro-preview";
 
 function formatTimestamp(seconds: number): string {
   const totalSeconds = Math.max(0, Math.floor(seconds));
@@ -271,7 +268,6 @@ export default function Home() {
   const [documentUploading, setDocumentUploading] = useState(false);
   const [documentStatus, setDocumentStatus] = useState("");
   const [documentError, setDocumentError] = useState("");
-  const [previewDocument, setPreviewDocument] = useState<UploadedDocument | null>(null);
   const [revealingComparisonId, setRevealingComparisonId] = useState("");
   const [loading, setLoading] = useState(false);
   const [ingesting, setIngesting] = useState(false);
@@ -315,18 +311,6 @@ export default function Home() {
     if (Math.abs(nearestTimestamp - timestamp) > 0.1) return [];
     return trackingOverlays.filter((overlay) => Math.abs(overlay.timestamp - nearestTimestamp) < 0.0001);
   }, [trackingOverlays, timestamp]);
-  const selectedComparisonDocumentIds = useMemo(
-    () =>
-      documents
-        .filter(
-          (document) =>
-            document.comparisonEligible &&
-            selectedDocumentIds.includes(document.id)
-        )
-        .map((document) => document.id),
-    [documents, selectedDocumentIds]
-  );
-
   function closeTrackingEventSource() {
     const source = trackingEventSourceRef.current as EventSource | null;
     if (source) {
@@ -616,14 +600,13 @@ export default function Home() {
         const nextDocument = {
           id: result.document_id,
           filename: result.filename,
-          chunkCount: result.chunk_count,
-          comparisonEligible: file.name.toLowerCase().endsWith(".pdf"),
+          chunkCount: 0,
         };
         return [...current.filter((document) => document.id !== result.document_id), nextDocument];
       });
       const isPdf = file.name.toLowerCase().endsWith(".pdf");
       if (isPdf) {
-        setDocumentStatus(`Processing both RAG indexes for ${result.filename}...`);
+        setDocumentStatus(`Preparing ${result.filename} for direct PDF reasoning...`);
         let status = await getDocumentStatus(result.document_id);
         for (let attempt = 0; status.status === "processing" && attempt < 300; attempt += 1) {
           await new Promise((resolve) => window.setTimeout(resolve, 1000));
@@ -635,24 +618,14 @@ export default function Home() {
             .map(([name, pipeline]) => `${name}: ${pipeline.error}`)
             .join("; ");
           throw new Error(
-            details || "The PDF did not become queryable in both RAG pipelines."
+            details || "The PDF did not become available for direct VLM reasoning."
           );
         }
-        const chunkCount = status.pipelines.text_rag?.chunk_count ?? result.chunk_count;
-        setDocuments((current) =>
-          current.map((document) =>
-            document.id === result.document_id
-              ? { ...document, chunkCount }
-              : document
-          )
-        );
       }
       setSelectedDocumentIds((current) =>
         current.includes(result.document_id) ? current : [...current, result.document_id]
       );
-      setDocumentStatus(
-        `Attached ${result.filename}${isPdf ? " — both RAG pipelines ready" : ` (${result.chunk_count} chunks)`}.`
-      );
+      setDocumentStatus(`Attached ${result.filename}${isPdf ? " - direct PDF ready" : ""}.`);
     } catch (error) {
       setDocumentError(errorMessage(error));
       setDocumentStatus("");
@@ -735,9 +708,8 @@ export default function Home() {
   async function handleAsk(event: FormEvent) {
     event.preventDefault();
     const trimmedQuestion = question.trim();
-    const comparisonMode = selectedComparisonDocumentIds.length > 0;
     const videoReady = Boolean(videoId && videoMetadataLoaded);
-    if ((!videoReady && !comparisonMode) || !trimmedQuestion) return;
+    if (!videoReady || !trimmedQuestion) return;
     const sourceTimestamp = timestamp + videoTimeOffset;
     setLoading(true);
     const attachedDocuments = documents
@@ -760,11 +732,9 @@ export default function Home() {
       {
         id: assistantMessageId,
         role: "assistant",
-        content: comparisonMode ? "" : "Thinking...",
+        content: "Thinking...",
         createdAt,
         model: selectedModel,
-        comparison: comparisonMode ? createComparisonTurn() : undefined,
-        comparisonQuestion: comparisonMode ? trimmedQuestion : undefined,
       },
     ]);
     setQuestion("");
@@ -773,11 +743,6 @@ export default function Home() {
     setActiveTrackingJobId("");
     setTrackingStatus("");
     setTrackingError("");
-
-    if (comparisonMode) {
-      await runComparison(assistantMessageId, trimmedQuestion, includeAnnotatedSnapshot);
-      return;
-    }
 
     try {
       const frameData = await captureFrame();
@@ -1025,7 +990,7 @@ export default function Home() {
         question: trimmedQuestion,
         annotations,
         transcript_window: transcript,
-        document_ids: selectedComparisonDocumentIds,
+        document_ids: selectedDocumentIds,
         model: selectedModel,
         retry_of: retryOf,
       });
@@ -1421,11 +1386,11 @@ export default function Home() {
           </div>
 
           <div className="op-card">
-            <h2 className="op-card-title">Contextual RAG Documents</h2>
+            <h2 className="op-card-title">Direct PDF Documents</h2>
             <input
               id="document-upload"
               type="file"
-              accept=".txt,.md,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              accept=".pdf,application/pdf"
               hidden
               disabled={documentUploading}
               onChange={(event) => {
@@ -1437,7 +1402,7 @@ export default function Home() {
             <label htmlFor="document-upload" className="op-attach-button">
               {documentUploading
                 ? "Uploading document..."
-                : "Attach user manuals or documents (.pdf, .md)"}
+                : "Attach PDF manuals or documents"}
             </label>
             {documentStatus && (
               <p role="status" className="op-status-text">
@@ -1461,31 +1426,15 @@ export default function Home() {
                       />
                       <span>
                         {document.filename}
-                        <span className="op-document-meta">{document.chunkCount} chunks</span>
+                        <span className="op-document-meta">Direct PDF</span>
                       </span>
                     </label>
-                    <div className="op-document-actions">
-                      <button
-                        type="button"
-                        className="op-document-action"
-                        onClick={() => setPreviewDocument(document)}
-                      >
-                        Preview text
-                      </button>
-                      <a
-                        className="op-document-action"
-                        href={getConvertedTextDownloadUrl(document.id)}
-                        download
-                      >
-                        Download
-                      </a>
-                    </div>
                   </div>
                 ))}
               </div>
             ) : null}
             <p className="op-help-text">
-              RAG attached: {selectedDocumentIds.length ? `${selectedDocumentIds.length} document(s)` : "none"}
+              Direct PDF attached: {selectedDocumentIds.length ? `${selectedDocumentIds.length} document(s)` : "none"}
             </p>
           </div>
 
@@ -1561,7 +1510,7 @@ export default function Home() {
                         <div className="op-chat-meta">
                           {message.role === "user" ? "User" : "Operator OS"}
                           {message.model ? ` · ${message.model}` : ""}
-                          {message.documents?.length ? ` · RAG: ${message.documents.join(", ")}` : ""}
+                          {message.documents?.length ? ` · PDF: ${message.documents.join(", ")}` : ""}
                           {message.role === "user"
                             ? ` · snapshot ${message.annotatedSnapshot ? "sent" : "not sent"}`
                             : ""}
@@ -1594,7 +1543,7 @@ export default function Home() {
                       loading ||
                       ingesting ||
                       hasUnrevealedCompletedComparison ||
-                      (!selectedComparisonDocumentIds.length && (!videoId || !videoMetadataLoaded))
+                      (!videoId || !videoMetadataLoaded)
                     }
                   >
                     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
@@ -1612,13 +1561,6 @@ export default function Home() {
           </div>
         </aside>
       </div>
-      {previewDocument ? (
-        <ConvertedTextPreview
-          documentId={previewDocument.id}
-          filename={previewDocument.filename}
-          onClose={() => setPreviewDocument(null)}
-        />
-      ) : null}
     </div>
   );
 }
