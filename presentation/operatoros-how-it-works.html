@@ -1,0 +1,1030 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OperatorOS - How It Works</title>
+  <style>
+    :root {
+      --bg: #10141f;
+      --slide: #f7f8fb;
+      --ink: #111827;
+      --muted: #5b6475;
+      --line: #d8dde8;
+      --blue: #2563eb;
+      --blue-soft: #dbeafe;
+      --green: #17845b;
+      --green-soft: #dff7eb;
+      --amber: #b7791f;
+      --amber-soft: #fff2cc;
+      --red: #b91c1c;
+      --red-soft: #fee2e2;
+      --panel: #ffffff;
+      --shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+      --radius: 8px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      overflow: hidden;
+    }
+
+    button {
+      font: inherit;
+    }
+
+    .deck {
+      height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      position: relative;
+    }
+
+    .viewport {
+      width: min(94vw, 1280px);
+      aspect-ratio: 16 / 9;
+      max-height: 86vh;
+      position: relative;
+      background: var(--slide);
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+
+    .slide {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 180ms ease;
+      background: var(--slide);
+    }
+
+    .slide.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .content {
+      height: 100%;
+      padding: 48px 58px 42px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .tight {
+      gap: 18px;
+    }
+
+    .hero {
+      color: white;
+      background:
+        linear-gradient(90deg, rgba(5, 8, 15, 0.88), rgba(5, 8, 15, 0.54) 48%, rgba(5, 8, 15, 0.12)),
+        url("Machine Introduction.png") center / cover no-repeat;
+    }
+
+    .hero .content {
+      justify-content: flex-end;
+      max-width: 760px;
+    }
+
+    .kicker {
+      color: var(--blue);
+      font-size: 13px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+    }
+
+    .hero .kicker {
+      color: #93c5fd;
+    }
+
+    h1,
+    h2,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: clamp(42px, 5vw, 72px);
+      line-height: 0.98;
+      letter-spacing: -0.04em;
+      max-width: 900px;
+    }
+
+    h2 {
+      font-size: clamp(30px, 3.5vw, 50px);
+      line-height: 1.04;
+      letter-spacing: -0.035em;
+      max-width: 980px;
+    }
+
+    .lead {
+      font-size: 22px;
+      line-height: 1.45;
+      color: var(--muted);
+      max-width: 860px;
+    }
+
+    .hero .lead {
+      color: rgba(255, 255, 255, 0.82);
+      max-width: 720px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 22px;
+      min-height: 0;
+      flex: 1;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+      min-height: 0;
+      flex: 1;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 22px;
+      min-height: 0;
+    }
+
+    .panel h3 {
+      margin: 0 0 10px;
+      font-size: 22px;
+      letter-spacing: -0.02em;
+    }
+
+    .panel p,
+    .panel li {
+      color: var(--muted);
+      font-size: 17px;
+      line-height: 1.45;
+    }
+
+    ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    li + li {
+      margin-top: 8px;
+    }
+
+    .callout {
+      border-left: 5px solid var(--blue);
+      background: var(--blue-soft);
+      padding: 18px 20px;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      color: #17356d;
+      font-size: 20px;
+      line-height: 1.4;
+      max-width: 920px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 7px 12px;
+      font-size: 13px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      width: fit-content;
+    }
+
+    .tag.blue {
+      color: #1d4ed8;
+      background: var(--blue-soft);
+    }
+
+    .tag.green {
+      color: var(--green);
+      background: var(--green-soft);
+    }
+
+    .tag.amber {
+      color: var(--amber);
+      background: var(--amber-soft);
+    }
+
+    .tag.red {
+      color: var(--red);
+      background: var(--red-soft);
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 14px;
+      align-items: stretch;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .step {
+      position: relative;
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .step:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      right: -13px;
+      top: 50%;
+      width: 12px;
+      height: 2px;
+      background: var(--line);
+    }
+
+    .num {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--blue);
+      color: white;
+      font-weight: 800;
+      font-size: 14px;
+    }
+
+    .step h3 {
+      margin: 0;
+      font-size: 19px;
+      line-height: 1.16;
+      letter-spacing: -0.02em;
+    }
+
+    .step p {
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.36;
+    }
+
+    .layer-map {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .layer {
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+    }
+
+    .layer h3 {
+      margin: 0 0 12px;
+      font-size: 21px;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .chip {
+      background: #f1f5f9;
+      border: 1px solid #e2e8f0;
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 15px;
+      color: #334155;
+      font-weight: 650;
+    }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 20px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .stack {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 170px 1fr;
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .label {
+      border-radius: var(--radius);
+      padding: 13px 14px;
+      background: #eef2ff;
+      color: #3730a3;
+      font-weight: 800;
+      font-size: 15px;
+      display: flex;
+      align-items: center;
+    }
+
+    .value {
+      border-radius: var(--radius);
+      padding: 13px 14px;
+      background: white;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.35;
+    }
+
+    .decision {
+      display: grid;
+      grid-template-columns: 1fr 160px 1fr;
+      gap: 18px;
+      align-items: center;
+      flex: 1;
+    }
+
+    .diamond {
+      aspect-ratio: 1;
+      background: white;
+      border: 2px solid var(--blue);
+      transform: rotate(45deg);
+      display: grid;
+      place-items: center;
+      margin: auto;
+      width: 150px;
+    }
+
+    .diamond span {
+      transform: rotate(-45deg);
+      text-align: center;
+      font-size: 17px;
+      line-height: 1.2;
+      font-weight: 800;
+      color: #1d4ed8;
+    }
+
+    .mini-flow {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .mini {
+      border-radius: var(--radius);
+      background: white;
+      border: 1px solid var(--line);
+      padding: 15px 16px;
+    }
+
+    .mini strong {
+      display: block;
+      font-size: 17px;
+      margin-bottom: 4px;
+    }
+
+    .mini span {
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.35;
+    }
+
+    .services {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 14px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .service {
+      background: white;
+      border: 1px solid var(--line);
+      border-top: 5px solid var(--blue);
+      border-radius: var(--radius);
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .service h3 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.15;
+    }
+
+    .service p {
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.38;
+    }
+
+    .service:nth-child(2) {
+      border-top-color: var(--green);
+    }
+
+    .service:nth-child(3) {
+      border-top-color: var(--amber);
+    }
+
+    .service:nth-child(4) {
+      border-top-color: #7c3aed;
+    }
+
+    .service:nth-child(5) {
+      border-top-color: var(--red);
+    }
+
+    .status-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .status-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .status-item {
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 12px;
+      align-items: center;
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 12px 14px;
+      font-size: 16px;
+      color: #2d3748;
+    }
+
+    .check {
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: var(--green-soft);
+      color: var(--green);
+      font-weight: 900;
+    }
+
+    .warn {
+      background: var(--amber-soft);
+      color: var(--amber);
+    }
+
+    .footer-note {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    .nav {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      z-index: 20;
+    }
+
+    .nav button {
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      color: white;
+      background: rgba(255, 255, 255, 0.08);
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+
+    .nav button:disabled {
+      opacity: 0.3;
+      cursor: default;
+    }
+
+    .dots {
+      display: flex;
+      gap: 7px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.28);
+      border: 0;
+      padding: 0;
+      cursor: pointer;
+    }
+
+    .dot.active {
+      background: white;
+      transform: scale(1.25);
+    }
+
+    .counter {
+      position: fixed;
+      top: 18px;
+      right: 24px;
+      color: rgba(255, 255, 255, 0.6);
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: 0.08em;
+    }
+
+    .hint {
+      position: fixed;
+      left: 24px;
+      bottom: 30px;
+      color: rgba(255, 255, 255, 0.48);
+      font-size: 13px;
+    }
+
+    @media (max-width: 900px) {
+      body {
+        overflow: auto;
+      }
+
+      .deck {
+        min-height: 100vh;
+        height: auto;
+      }
+
+      .viewport {
+        width: 100%;
+        aspect-ratio: auto;
+        min-height: 84vh;
+        max-height: none;
+      }
+
+      .slide {
+        overflow: auto;
+      }
+
+      .content {
+        padding: 30px;
+        overflow: auto;
+      }
+
+      .grid-2,
+      .grid-3,
+      .flow,
+      .layer-map,
+      .pipeline,
+      .decision,
+      .services,
+      .status-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .step:not(:last-child)::after {
+        display: none;
+      }
+
+      .hint {
+        display: none;
+      }
+    }
+
+    @media print {
+      html,
+      body {
+        height: auto;
+        overflow: visible;
+        background: white;
+      }
+
+      .deck {
+        display: block;
+        height: auto;
+        padding: 0;
+      }
+
+      .viewport {
+        width: 100%;
+        max-height: none;
+        aspect-ratio: auto;
+        box-shadow: none;
+        overflow: visible;
+      }
+
+      .slide {
+        position: relative;
+        opacity: 1;
+        pointer-events: auto;
+        page-break-after: always;
+        height: 100vh;
+      }
+
+      .nav,
+      .counter,
+      .hint {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="deck">
+    <div class="counter"><span id="current">1</span> / <span id="total">10</span></div>
+    <div class="hint">Use arrow keys or space to move through the deck</div>
+
+    <main class="viewport">
+      <section class="slide hero active">
+        <div class="content">
+          <div class="kicker">OperatorOS</div>
+          <h1>Pause, point, ask, and understand the machine.</h1>
+          <p class="lead">
+            A video-first multimodal assistant for learning manufacturing equipment before hands-on training.
+          </p>
+        </div>
+      </section>
+
+      <section class="slide">
+        <div class="content">
+          <div class="kicker">Product Overview</div>
+          <h2>OperatorOS turns a machine video into an interactive learning workspace.</h2>
+          <div class="grid-2">
+            <div class="panel">
+              <h3>What the learner can do</h3>
+              <ul>
+                <li>Upload a local MP4 or ingest a YouTube video.</li>
+                <li>Pause at the exact machine part they care about.</li>
+                <li>Draw boxes, circles, arrows, pen marks, or text.</li>
+                <li>Attach PDF manuals and ask plain-language questions.</li>
+              </ul>
+            </div>
+            <div class="panel">
+              <h3>What OperatorOS returns</h3>
+              <ul>
+                <li>A chat answer grounded in the visible frame first.</li>
+                <li>Visual marks that explain the answer on the video.</li>
+                <li>Optional SAM3 tracking when a part should be followed.</li>
+                <li>A highlighted tracking clip from the paused moment onward.</li>
+              </ul>
+            </div>
+          </div>
+          <div class="callout">
+            The key idea: a learner can point at something in a real tutorial video and ask, "What is this?"
+          </div>
+        </div>
+      </section>
+
+      <section class="slide">
+        <div class="content tight">
+          <div class="kicker">End-To-End Flow</div>
+          <h2>The full system flow in one clean path.</h2>
+          <div class="flow">
+            <div class="step">
+              <div class="num">1</div>
+              <h3>User input</h3>
+              <p>Video, PDF manual, paused timestamp, query, and user-drawn annotation.</p>
+            </div>
+            <div class="step">
+              <div class="num">2</div>
+              <h3>System preparation</h3>
+              <p>Store video, transcribe with Whisper, capture current frame, and store PDF originals.</p>
+            </div>
+            <div class="step">
+              <div class="num">3</div>
+              <h3>VLM context</h3>
+              <p>Package the frame, annotation JSON, transcript window, PDFs, and conversation memory.</p>
+            </div>
+            <div class="step">
+              <div class="num">4</div>
+              <h3>VLM output</h3>
+              <p>Return structured JSON: answer, visual annotations, tracking prompt, tracking annotations.</p>
+            </div>
+            <div class="step">
+              <div class="num">5</div>
+              <h3>Answer or track</h3>
+              <p>Show the answer immediately. Start SAM3 if tracking is requested or suggested.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide">
+        <div class="content">
+          <div class="kicker">Inputs</div>
+          <h2>OperatorOS separates what the user provides from what the system prepares.</h2>
+          <div class="layer-map">
+            <div class="layer">
+              <h3>User input layer</h3>
+              <div class="chips">
+                <span class="chip">Machine video</span>
+                <span class="chip">PDF manual</span>
+                <span class="chip">Question</span>
+                <span class="chip">Paused moment</span>
+                <span class="chip">Drawn annotation</span>
+              </div>
+            </div>
+            <div class="layer">
+              <h3>System input layer</h3>
+              <div class="chips">
+                <span class="chip">Stored source MP4</span>
+                <span class="chip">Whisper transcript window</span>
+                <span class="chip">Current frame image</span>
+                <span class="chip">Annotation JSON</span>
+                <span class="chip">Optional annotated snapshot</span>
+                <span class="chip">Original PDF file parts</span>
+                <span class="chip">Conversation memory</span>
+              </div>
+            </div>
+          </div>
+          <div class="callout">
+            Current implementation note: manuals are attached directly as original PDFs to the VLM. There is no current text-chunk or embedding retrieval step.
+          </div>
+        </div>
+      </section>
+
+      <section class="slide">
+        <div class="content tight">
+          <div class="kicker">VLM Reasoning</div>
+          <h2>What the vision-language model receives and returns.</h2>
+          <div class="pipeline">
+            <div class="stack">
+              <div class="row">
+                <div class="label">Frame</div>
+                <div class="value">The browser captures the exact paused video frame.</div>
+              </div>
+              <div class="row">
+                <div class="label">Annotations</div>
+                <div class="value">User drawings are sent as normalized 0-1000 JSON coordinates, with an optional annotated image.</div>
+              </div>
+              <div class="row">
+                <div class="label">Transcript</div>
+                <div class="value">Only the nearby transcript window is sent, not the full video transcript.</div>
+              </div>
+              <div class="row">
+                <div class="label">Manuals</div>
+                <div class="value">Selected original PDF manuals are attached directly to the OpenRouter request.</div>
+              </div>
+              <div class="row">
+                <div class="label">Memory</div>
+                <div class="value">Recent conversation turns keep follow-up questions understandable.</div>
+              </div>
+            </div>
+            <div class="panel">
+              <span class="tag blue">Structured response</span>
+              <h3 style="margin-top: 18px;">The VLM must answer in JSON</h3>
+              <ul>
+                <li><strong>answer</strong> - the chat response</li>
+                <li><strong>annotations</strong> - visual explanation marks</li>
+                <li><strong>tracking_prompt</strong> - text target for SAM3</li>
+                <li><strong>tracking_annotations</strong> - optional box or shape target</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide">
+        <div class="content">
+          <div class="kicker">SAM3 Branch</div>
+          <h2>SAM3 starts only when tracking makes sense.</h2>
+          <div class="decision">
+            <div class="mini-flow">
+              <div class="mini">
+                <strong>Normal answer path</strong>
+                <span>The user gets a text answer and model-generated visual marks over the paused frame.</span>
+              </div>
+              <div class="mini">
+                <strong>No tracking needed</strong>
+                <span>The flow ends here when the question only needs explanation.</span>
+              </div>
+            </div>
+            <div class="diamond"><span>Start<br />SAM3?</span></div>
+            <div class="mini-flow">
+              <div class="mini">
+                <strong>Tracking starts if</strong>
+                <span>The user says track, follow, trace, or monitor; auto-tracking is enabled; or the VLM returns a tracking target.</span>
+              </div>
+              <div class="mini">
+                <strong>Target priority</strong>
+                <span>Use VLM tracking annotation first, then VLM tracking prompt, then the user's tracking question.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide">
+        <div class="content">
+          <div class="kicker">Tracking Output</div>
+          <h2>SAM3 produces a new highlighted video clip.</h2>
+          <div class="grid-3">
+            <div class="panel">
+              <span class="tag blue">1. Clip</span>
+              <h3>Start at the paused timestamp</h3>
+              <p>The SAM3 service clips the source video from the exact source time where the user asked for tracking.</p>
+            </div>
+            <div class="panel">
+              <span class="tag green">2. Segment</span>
+              <h3>Track frame by frame</h3>
+              <p>SAM3 uses a box prompt when one exists, or a text prompt when the target is only described.</p>
+            </div>
+            <div class="panel">
+              <span class="tag amber">3. Render</span>
+              <h3>Bake masks into video</h3>
+              <p>The mask is blended into each processed frame, then FFmpeg writes a browser-playable H.264 MP4.</p>
+            </div>
+          </div>
+          <div class="callout">
+            Current behavior: the frontend switches the player to the generated tracking clip. Clip time 0:00 maps back to the original paused timestamp.
+          </div>
+        </div>
+      </section>
+
+      <section class="slide">
+        <div class="content tight">
+          <div class="kicker">Architecture</div>
+          <h2>The app is split into services with clear responsibilities.</h2>
+          <div class="services">
+            <div class="service">
+              <h3>Frontend</h3>
+              <p>Video player, drawing tools, chat, document selection, transcript panel, and tracking status.</p>
+            </div>
+            <div class="service">
+              <h3>Orchestrator</h3>
+              <p>Central FastAPI gateway. Routes chat, media, transcript, document, and tracking requests.</p>
+            </div>
+            <div class="service">
+              <h3>Video service</h3>
+              <p>Handles MP4 uploads, YouTube ingestion, validation, Whisper transcription, frame indexing, and streaming.</p>
+            </div>
+            <div class="service">
+              <h3>RAGVLM service</h3>
+              <p>Stores original PDFs, builds prompts, attaches selected PDFs, and streams OpenRouter VLM output.</p>
+            </div>
+            <div class="service">
+              <h3>SAM3 service</h3>
+              <p>Loads SAM3, clips video, runs box or text prompted tracking, renders masks, and outputs MP4.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide">
+        <div class="content">
+          <div class="kicker">Current Version</div>
+          <h2>What is working today, and what is still a limitation.</h2>
+          <div class="status-grid">
+            <div class="panel">
+              <span class="tag green">Working</span>
+              <div class="status-list" style="margin-top: 16px;">
+                <div class="status-item"><span class="check">OK</span><span>Local MP4 and YouTube video ingestion</span></div>
+                <div class="status-item"><span class="check">OK</span><span>Whisper transcript windows with fallback timestamps</span></div>
+                <div class="status-item"><span class="check">OK</span><span>Paused-frame chat with user annotations</span></div>
+                <div class="status-item"><span class="check">OK</span><span>Direct PDF-to-VLM manual context</span></div>
+                <div class="status-item"><span class="check">OK</span><span>SAM3 rendered tracking clips</span></div>
+              </div>
+            </div>
+            <div class="panel">
+              <span class="tag amber">Limitations</span>
+              <div class="status-list" style="margin-top: 16px;">
+                <div class="status-item"><span class="check warn">!</span><span>Tracking clips currently do not preserve original audio</span></div>
+                <div class="status-item"><span class="check warn">!</span><span>The player switches to the tracked suffix clip</span></div>
+                <div class="status-item"><span class="check warn">!</span><span>Long high-frame-rate videos can take time to process</span></div>
+                <div class="status-item"><span class="check warn">!</span><span>Generated tracking files are stored locally</span></div>
+                <div class="status-item"><span class="check warn">!</span><span>Manual understanding depends on the selected VLM's PDF ability</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide">
+        <div class="content">
+          <div class="kicker">Presenter Summary</div>
+          <h2>OperatorOS is strongest when the demo shows the core loop.</h2>
+          <div class="grid-2">
+            <div class="panel">
+              <h3>Demo story</h3>
+              <ul>
+                <li>Load a machine tutorial.</li>
+                <li>Pause when a part is visible.</li>
+                <li>Draw on the part.</li>
+                <li>Ask what it is or what it does.</li>
+                <li>Show the chat answer and visual overlay.</li>
+                <li>Ask to track the part if it should be followed.</li>
+              </ul>
+            </div>
+            <div class="panel">
+              <h3>One-sentence explanation</h3>
+              <p style="font-size: 24px; line-height: 1.35; color: #172033;">
+                OperatorOS gathers everything relevant about a paused moment in a machine video and asks an AI that can explain in words, draw on the frame, and optionally track the selected part forward.
+              </p>
+            </div>
+          </div>
+          <p class="footer-note">
+            OperatorOS is a learning aid for preparation and explanation. Safety-critical machine operation still requires qualified human supervision.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <nav class="nav" aria-label="Slide controls">
+      <button id="prev" aria-label="Previous slide">&lt;</button>
+      <div class="dots" id="dots"></div>
+      <button id="next" aria-label="Next slide">&gt;</button>
+    </nav>
+  </div>
+
+  <script>
+    const slides = Array.from(document.querySelectorAll(".slide"));
+    const dots = document.getElementById("dots");
+    const prev = document.getElementById("prev");
+    const next = document.getElementById("next");
+    const currentLabel = document.getElementById("current");
+    const totalLabel = document.getElementById("total");
+    let current = 0;
+
+    totalLabel.textContent = String(slides.length);
+
+    slides.forEach((_, index) => {
+      const dot = document.createElement("button");
+      dot.className = "dot" + (index === 0 ? " active" : "");
+      dot.type = "button";
+      dot.setAttribute("aria-label", "Go to slide " + (index + 1));
+      dot.addEventListener("click", () => goTo(index));
+      dots.appendChild(dot);
+    });
+
+    function goTo(index) {
+      if (index < 0 || index >= slides.length) return;
+      slides[current].classList.remove("active");
+      dots.children[current].classList.remove("active");
+      current = index;
+      slides[current].classList.add("active");
+      dots.children[current].classList.add("active");
+      currentLabel.textContent = String(current + 1);
+      prev.disabled = current === 0;
+      next.disabled = current === slides.length - 1;
+    }
+
+    prev.addEventListener("click", () => goTo(current - 1));
+    next.addEventListener("click", () => goTo(current + 1));
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowRight" || event.key === "ArrowDown" || event.key === " ") {
+        event.preventDefault();
+        goTo(current + 1);
+      }
+      if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        event.preventDefault();
+        goTo(current - 1);
+      }
+      if (event.key === "Home") {
+        event.preventDefault();
+        goTo(0);
+      }
+      if (event.key === "End") {
+        event.preventDefault();
+        goTo(slides.length - 1);
+      }
+    });
+
+    goTo(0);
+  </script>
+</body>
+</html>
