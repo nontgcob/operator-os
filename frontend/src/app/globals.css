@@ -348,6 +348,11 @@ button {
 
 .op-video-shell {
   margin-top: 14px;
+}
+
+.op-video-stage {
+  border-radius: var(--radius-lg);
+  overflow: hidden;
   position: relative;
 }
 
@@ -391,6 +396,19 @@ button {
   width: 100%;
 }
 
+.op-tracking-canvas {
+  height: 100%;
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  width: 100%;
+  z-index: 1;
+}
+
+.op-video-stage > svg {
+  z-index: 2;
+}
+
 .op-sidebar-section-header {
   align-items: center;
   display: flex;
@@ -413,6 +431,90 @@ button {
 
 .op-checkbox-row span {
   font-size: 0.9rem;
+}
+
+.op-tracking-layer-panel {
+  background: var(--bg-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  margin-top: 12px;
+  padding: 10px;
+}
+
+.op-tracking-layer-heading,
+.op-tracking-layer-row {
+  align-items: center;
+  display: flex;
+}
+
+.op-tracking-layer-heading {
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.op-tracking-layer-heading strong {
+  font-size: 0.88rem;
+}
+
+.op-layer-action,
+.op-tracking-layer-remove {
+  background: transparent;
+  border: 0;
+  color: var(--primary);
+  cursor: pointer;
+  font-size: 0.72rem;
+  padding: 2px 4px;
+}
+
+.op-layer-action:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.op-tracking-round + .op-tracking-round {
+  border-top: 1px solid var(--border);
+  margin-top: 9px;
+  padding-top: 9px;
+}
+
+.op-tracking-round-label {
+  color: var(--text-soft);
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  margin-bottom: 5px;
+  text-transform: uppercase;
+}
+
+.op-tracking-layer-row {
+  gap: 7px;
+  min-height: 30px;
+}
+
+.op-tracking-layer-row > input[type="checkbox"] {
+  accent-color: var(--primary);
+}
+
+.op-tracking-layer-color {
+  background: transparent;
+  border: 0;
+  height: 20px;
+  padding: 0;
+  width: 20px;
+}
+
+.op-tracking-layer-name {
+  flex: 1;
+  font-size: 0.78rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.op-tracking-layer-remove {
+  color: #dc2626;
 }
 
 .op-help-text {
@@ -777,8 +879,11 @@ button {
 }
 
 .op-inline-actions {
+  align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+  justify-content: flex-end;
 }
 
 .op-link-button {

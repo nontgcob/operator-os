@@ -72,6 +72,37 @@ def test_tracking_start_writes_unavailable_backend_error() -> None:
     assert payload["error"]["code"] == "sam3_dependency_missing"
 
 
+def test_clean_tracking_video_serves_the_untracked_slice(monkeypatch, tmp_path: Path) -> None:
+    module = _load_sam3_main()
+    clean_clip = tmp_path / "job-1.clean.mp4"
+    clean_clip.write_bytes(b"clean-video-slice")
+    monkeypatch.setenv("SAM3_RENDERED_VIDEO_ROOT", str(tmp_path))
+
+    response = TestClient(module.app).get("/tracking/clean-video/job-1")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "video/mp4"
+    assert response.content == b"clean-video-slice"
+
+
+def test_completed_tracking_persists_a_fetchable_overlay_manifest(monkeypatch, tmp_path: Path) -> None:
+    module = _load_sam3_main()
+    module.state_client = FakeRedis()
+    module._tracking_backend = tracking_backend.SimulationTrackingBackend(steps=2, delay_seconds=0)
+    monkeypatch.setenv("SAM3_RENDERED_VIDEO_ROOT", str(tmp_path))
+    client = TestClient(module.app)
+
+    response = client.post("/tracking/start", json=_tracking_request())
+    manifest_response = client.get("/tracking/overlays/job-1")
+
+    assert response.status_code == 200
+    assert manifest_response.status_code == 200
+    manifest = manifest_response.json()
+    assert manifest["tracking_job_id"] == "job-1"
+    assert manifest["overlay_count"] == 2
+    assert len(manifest["overlays"]) == 2
+
+
 def test_simulation_backend_requires_explicit_fallback_flag() -> None:
     disabled = tracking_backend.build_tracking_backend(
         tracking_backend.TrackingBackendConfig(
@@ -134,6 +165,28 @@ def test_sam3_outputs_are_converted_to_frontend_overlay_shape() -> None:
     assert overlay["points"][3] == {"x": 10.0, "y": pytest.approx(60.0)}
 
 
+def test_cached_video_predictor_state_is_reset_between_tracking_rounds() -> None:
+    class FakePredictor:
+        def __init__(self) -> None:
+            self.inference_state = {"text_ids": [0], "text_prompt": ["first target"]}
+            self.tracker = SimpleNamespace(inference_state={"obj_ids": [1]})
+            self.prompts = {"text": "first target"}
+            self.model = SimpleNamespace(text_embeddings={"first target": object()})
+
+        def reset_prompts(self) -> None:
+            self.prompts = {}
+            self.model.text_embeddings = {}
+
+    predictor = FakePredictor()
+
+    tracking_backend.reset_video_predictor_state(predictor)
+
+    assert predictor.inference_state == {}
+    assert predictor.tracker.inference_state == {}
+    assert predictor.prompts == {}
+    assert set(predictor.model.text_embeddings) == {"first target"}
+
+
 def test_disconnected_mask_regions_become_separate_polygons() -> None:
     mask = np.zeros((20, 20), dtype=np.float32)
     mask[2:8, 2:8] = 1
@@ -147,10 +200,7 @@ def test_disconnected_mask_regions_become_separate_polygons() -> None:
     overlays = tracking_backend.ultralytics_result_to_overlays(result, timestamp=1.25)
 
     assert len(overlays) == 2
-    assert {overlay["track_id"] for overlay in overlays} == {
-        "sam3-4-contour-1",
-        "sam3-4-contour-2",
-    }
+    assert {overlay["track_id"] for overlay in overlays} == {"sam3-4"}
     assert all(len(overlay["points"]) >= 3 for overlay in overlays)
     assert all(
         0 <= point[axis] <= 100

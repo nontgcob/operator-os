@@ -99,10 +99,44 @@ def _store_tracking_update(tracking_job_id: str, payload: dict[str, Any]) -> Non
     )
 
 
+def _tracking_overlay_path(tracking_job_id: str) -> Path:
+    output_root = Path(os.getenv("SAM3_RENDERED_VIDEO_ROOT", "./data/tracking")).expanduser()
+    return output_root / f"{tracking_job_id}.overlays.json"
+
+
+def _store_tracking_overlays(tracking_job_id: str, overlays: list[dict[str, Any]]) -> Path:
+    output_path = _tracking_overlay_path(tracking_job_id)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    working_path = output_path.with_suffix(".working.json")
+    working_path.write_text(
+        json.dumps(
+            {
+                "tracking_job_id": tracking_job_id,
+                "overlay_count": len(overlays),
+                "overlays": overlays,
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    working_path.replace(output_path)
+    return output_path
+
+
 async def _run_tracking(payload: TrackingStartRequest) -> None:
+    collected_overlays: list[dict[str, Any]] = []
+    overlay_keys: set[str] = set()
     try:
         backend = get_tracking_backend()
         async for update in backend.track(_tracking_job(payload)):
+            for overlay in update.get("overlays", []):
+                overlay_key = json.dumps(overlay, sort_keys=True, separators=(",", ":"))
+                if overlay_key not in overlay_keys:
+                    overlay_keys.add(overlay_key)
+                    collected_overlays.append(overlay)
+            if update.get("done") and not update.get("error"):
+                _store_tracking_overlays(payload.tracking_job_id, collected_overlays)
+                update = {**update, "overlay_count": len(collected_overlays)}
             _store_tracking_update(payload.tracking_job_id, update)
     except Exception as exc:
         _store_tracking_update(
@@ -192,6 +226,27 @@ async def tracking_video(tracking_job_id: str) -> FileResponse:
     if not video_path.is_file():
         raise HTTPException(status_code=404, detail="Rendered tracking video was not found")
     return FileResponse(video_path, media_type="video/mp4", filename=f"{tracking_job_id}.mp4")
+
+
+@app.get("/tracking/clean-video/{tracking_job_id}")
+async def clean_tracking_video(tracking_job_id: str) -> FileResponse:
+    if not re.fullmatch(r"[A-Za-z0-9-]+", tracking_job_id):
+        raise HTTPException(status_code=400, detail="Invalid tracking job ID")
+    output_root = Path(os.getenv("SAM3_RENDERED_VIDEO_ROOT", "./data/tracking")).expanduser()
+    video_path = output_root / f"{tracking_job_id}.clean.mp4"
+    if not video_path.is_file():
+        raise HTTPException(status_code=404, detail="Clean tracking clip was not found")
+    return FileResponse(video_path, media_type="video/mp4", filename=f"{tracking_job_id}.clean.mp4")
+
+
+@app.get("/tracking/overlays/{tracking_job_id}")
+async def tracking_overlays(tracking_job_id: str) -> FileResponse:
+    if not re.fullmatch(r"[A-Za-z0-9-]+", tracking_job_id):
+        raise HTTPException(status_code=400, detail="Invalid tracking job ID")
+    overlay_path = _tracking_overlay_path(tracking_job_id)
+    if not overlay_path.is_file():
+        raise HTTPException(status_code=404, detail="Tracking overlays were not found")
+    return FileResponse(overlay_path, media_type="application/json", filename=f"{tracking_job_id}.overlays.json")
 
 
 @app.get("/tracking/events/{tracking_job_id}")

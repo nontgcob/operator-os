@@ -164,3 +164,19 @@ export interface TrackingOverlay {
   points: Point[];
   timestamp: number;
 }
+
+export interface TrackingOverlayManifest {
+  tracking_job_id: string;
+  overlay_count: number;
+  overlays: TrackingOverlay[];
+}
+
+export interface TrackingLayer {
+  id: string;
+  jobId: string;
+  round: number;
+  label: string;
+  color: string;
+  visible: boolean;
+  overlays: TrackingOverlay[];
+}

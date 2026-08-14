@@ -1,10 +1,11 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { AnnotationControls } from "@/components/AnnotationControls";
 import { AnnotationOverlay } from "@/components/AnnotationOverlay";
 import { ComparisonTurnCard } from "@/components/ComparisonTurnCard";
+import { TrackingOverlayCanvas } from "@/components/TrackingOverlayCanvas";
 import {
   comparisonExportLines,
   createComparisonTurn,
@@ -14,11 +15,14 @@ import {
 import { readComparisonSSE } from "@/lib/comparisonStream";
 import { parseModelResponse } from "@/lib/parseResponse";
 import { explicitlyRequestsTracking } from "@/lib/trackingIntent";
+import { createTrackingLayers } from "@/lib/trackingLayers";
 import {
   askComparison,
   askQuestion,
+  clearChatSession,
   revealComparison,
   getMediaSourceUrl,
+  getTrackingOverlays,
   getDocumentStatus,
   getTranscriptWindow,
   getVideoMetadata,
@@ -33,6 +37,7 @@ import type {
   AnnotationType,
   AnswerLabel,
   ComparisonTurn,
+  TrackingLayer,
   TrackingOverlay,
   TranscriptWindowResponse,
 } from "@/lib/types";
@@ -257,6 +262,7 @@ function readSSE(
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [videoUrl, setVideoUrl] = useState<string>("");
+  const [originalVideoUrl, setOriginalVideoUrl] = useState<string>("");
   const [videoId, setVideoId] = useState<string>("");
   const [videoTitle, setVideoTitle] = useState<string>("");
   const [sessionId] = useState(() => crypto.randomUUID());
@@ -284,11 +290,13 @@ export default function Home() {
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [modelAnnotations, setModelAnnotations] = useState<Annotation[]>([]);
   const [trackingOverlays, setTrackingOverlays] = useState<TrackingOverlay[]>([]);
+  const [trackingLayers, setTrackingLayers] = useState<TrackingLayer[]>([]);
   const [trackingEnabled, setTrackingEnabled] = useState(false);
   const [showTrackingOverlays, setShowTrackingOverlays] = useState(false);
   const [activeTrackingJobId, setActiveTrackingJobId] = useState("");
   const [trackingStatus, setTrackingStatus] = useState("");
   const [trackingError, setTrackingError] = useState("");
+  const [chatClearStatus, setChatClearStatus] = useState("");
   const [sendAnnotatedSnapshot, setSendAnnotatedSnapshot] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [activeTool, setActiveTool] = useState<AnnotationType>("cursor");
@@ -301,16 +309,6 @@ export default function Home() {
   const trackingEventSourceRef = useRef<EventSource | null>(null);
   const resumeAfterTrackingRef = useRef(false);
 
-  const currentOverlay = useMemo(() => {
-    if (!trackingOverlays.length) return [];
-    const nearestTimestamp = trackingOverlays.reduce((nearest, overlay) =>
-      Math.abs(overlay.timestamp - timestamp) < Math.abs(nearest - timestamp)
-        ? overlay.timestamp
-        : nearest
-    , trackingOverlays[0].timestamp);
-    if (Math.abs(nearestTimestamp - timestamp) > 0.1) return [];
-    return trackingOverlays.filter((overlay) => Math.abs(overlay.timestamp - nearestTimestamp) < 0.0001);
-  }, [trackingOverlays, timestamp]);
   function closeTrackingEventSource() {
     const source = trackingEventSourceRef.current as EventSource | null;
     if (source) {
@@ -321,7 +319,14 @@ export default function Home() {
 
   function resetVideoContext() {
     closeTrackingEventSource();
+    if (videoUrl && videoUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(videoUrl);
+    }
+    if (originalVideoUrl && originalVideoUrl !== videoUrl && originalVideoUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(originalVideoUrl);
+    }
     setVideoUrl("");
+    setOriginalVideoUrl("");
     setVideoId("");
     setVideoTitle("");
     setVideoMetadataLoaded(false);
@@ -335,10 +340,12 @@ export default function Home() {
     setModelAnnotations([]);
     setAnnotationUndoStack([]);
     setTrackingOverlays([]);
+    setTrackingLayers([]);
     setActiveTrackingJobId("");
     setTrackingStatus("");
     setTrackingError("");
     setChatMessages([]);
+    setChatClearStatus("");
   }
 
   function downloadChat() {
@@ -388,6 +395,48 @@ export default function Home() {
   function clearAnnotations() {
     setAnnotations([]);
     setAnnotationUndoStack([]);
+  }
+
+  function removeTracking() {
+    if (!trackingLayers.length) return;
+    closeTrackingEventSource();
+    setTrackingOverlays([]);
+    setTrackingLayers([]);
+    setActiveTrackingJobId("");
+    setTrackingStatus("All tracking layers removed.");
+    setTrackingError("");
+    resumeAfterTrackingRef.current = false;
+  }
+
+  function restoreFullVideo() {
+    closeTrackingEventSource();
+    setTrackingOverlays([]);
+    setAnnotations([]);
+    setModelAnnotations([]);
+    setAnnotationUndoStack([]);
+    setActiveTrackingJobId("");
+    setTrackingLayers([]);
+    setTrackingStatus("");
+    setTrackingError("");
+    setShowTrackingOverlays(false);
+    setVideoTimeOffset(0);
+    setTimestamp(0);
+    resumeAfterTrackingRef.current = false;
+    if (originalVideoUrl && videoUrl !== originalVideoUrl) {
+      setVideoUrl(originalVideoUrl);
+      setPendingVideoReadyStatus("Full original video restored.");
+    }
+  }
+
+  async function clearChatHistory() {
+    setChatMessages([]);
+    setChatClearStatus("Clearing conversation memory...");
+    try {
+      await clearChatSession(sessionId);
+      setChatClearStatus("Conversation memory cleared.");
+    } catch (error) {
+      setChatClearStatus(`Visible chat cleared, but backend memory was not cleared: ${errorMessage(error)}`);
+    }
   }
 
   function undoAnnotation() {
@@ -654,6 +703,7 @@ export default function Home() {
     setIngestStatus("Uploading local MP4...");
     const objectUrl = URL.createObjectURL(file);
     setVideoUrl(objectUrl);
+    setOriginalVideoUrl(objectUrl);
     try {
       const result = await uploadMedia(file);
       setVideoId(result.video_id);
@@ -669,6 +719,7 @@ export default function Home() {
     } catch (error) {
       URL.revokeObjectURL(objectUrl);
       setVideoUrl("");
+      setOriginalVideoUrl("");
       setIngestError(errorMessage(error));
       setIngestStatus("");
     } finally {
@@ -692,10 +743,12 @@ export default function Home() {
     );
     try {
       const result = await ingestYoutubeUrl(trimmedUrl);
+      const sourceUrl = getMediaSourceUrl(result.video_id);
       setVideoId(result.video_id);
       await syncVideoTitle(result.video_id, result.title);
       setPendingVideoReadyStatus("YouTube video ready.");
-      setVideoUrl(getMediaSourceUrl(result.video_id));
+      setVideoUrl(sourceUrl);
+      setOriginalVideoUrl(sourceUrl);
       setIngestStatus("YouTube video downloaded. Loading player metadata...");
     } catch (error) {
       setIngestError(errorMessage(error));
@@ -738,6 +791,7 @@ export default function Home() {
       },
     ]);
     setQuestion("");
+    setChatClearStatus("");
     closeTrackingEventSource();
     setTrackingOverlays([]);
     setActiveTrackingJobId("");
@@ -879,6 +933,7 @@ export default function Home() {
           setShowTrackingOverlays(true);
         }
 
+        const layerPrompt = parsed.trackingPrompt.trim() || trimmedQuestion;
         try {
           const tracking = await startTracking({
             session_id: sessionId,
@@ -886,8 +941,7 @@ export default function Home() {
             timestamp: sourceTimestamp,
             frame_data_url: frameData,
             question: trimmedQuestion,
-            segmentation_prompt:
-              parsed.trackingPrompt.trim() || trimmedQuestion,
+            segmentation_prompt: layerPrompt,
             annotations: trackingAnnotations,
           });
           const trackingJobId = tracking.tracking_job_id;
@@ -897,7 +951,8 @@ export default function Home() {
             `${process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ?? "http://localhost:8000"}/tracking/events/${trackingJobId}`
           );
           trackingEventSourceRef.current = events;
-          events.onmessage = (e) => {
+          let completionHandled = false;
+          events.onmessage = async (e) => {
             const payload = JSON.parse(e.data) as {
               tracking_job_id?: string;
               done: boolean;
@@ -905,6 +960,7 @@ export default function Home() {
               backend?: string;
               overlays: TrackingOverlay[];
               rendered_video_path?: string;
+              clean_video_path?: string;
               error?: { message?: string };
             };
             if (payload.tracking_job_id && payload.tracking_job_id !== trackingJobId) return;
@@ -919,15 +975,40 @@ export default function Home() {
             );
             setTrackingOverlays(payload.overlays);
             if (payload.done) {
-              if (!payload.error && payload.rendered_video_path) {
-                const baseUrl = process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ?? "http://localhost:8000";
-                setTrackingOverlays([]);
-                setShowTrackingOverlays(false);
-                setVideoTimeOffset(sourceTimestamp);
-                setTimestamp(0);
-                setVideoUrl(`${baseUrl}/tracking/video/${trackingJobId}?v=${Date.now()}`);
-                setTrackingStatus("SAM3 processed video ready. Press play to view tracking.");
+              if (completionHandled) return;
+              completionHandled = true;
+              if (!payload.error) {
+                try {
+                  const manifest = await getTrackingOverlays(trackingJobId);
+                  const objectCount = new Set(manifest.overlays.map((overlay) => overlay.track_id)).size;
+                  if (!objectCount) {
+                    setTrackingError("SAM3 completed but did not return any trackable masks.");
+                  } else {
+                    setTrackingLayers((currentLayers) => {
+                      const nextRound = Math.max(0, ...currentLayers.map((layer) => layer.round)) + 1;
+                      return [
+                        ...currentLayers,
+                        ...createTrackingLayers({
+                          jobId: trackingJobId,
+                          round: nextRound,
+                          prompt: layerPrompt,
+                          overlays: manifest.overlays,
+                          colorOffset: currentLayers.length,
+                        }),
+                      ];
+                    });
+                    setTrackingStatus(
+                      `Added ${objectCount} tracking layer${objectCount === 1 ? "" : "s"}.`
+                    );
+                    setShowTrackingOverlays(true);
+                  }
+                  setTrackingOverlays([]);
+                } catch (error) {
+                  const message = error instanceof Error ? error.message : "Unable to load tracking masks.";
+                  setTrackingError(`Tracking finished, but its layers could not be loaded: ${message}`);
+                }
               }
+              setActiveTrackingJobId("");
               resumeAfterTrackingRef.current = false;
               events.close();
               if (trackingEventSourceRef.current === events) {
@@ -936,6 +1017,7 @@ export default function Home() {
             }
           };
           events.onerror = () => {
+            if (completionHandled) return;
             setTrackingError("Tracking event stream failed.");
             resumeAfterTrackingRef.current = false;
             events.close();
@@ -1220,6 +1302,7 @@ export default function Home() {
                 <h2 className="op-video-title">{videoTitle}</h2>
               </div>
             ) : null}
+            <div className="op-video-stage">
             {videoUrl ? (
               <video
                 ref={videoRef}
@@ -1257,7 +1340,7 @@ export default function Home() {
                   setAnnotationUndoStack([]);
                   setIsPaused(true);
                   if (videoId) {
-                    await loadTranscriptWindow(videoId, nextTs);
+                    await loadTranscriptWindow(videoId, nextTs + videoTimeOffset);
                   }
                 }}
                 onPlay={() => {
@@ -1276,11 +1359,19 @@ export default function Home() {
               </div>
             )}
             {videoUrl && (
+              <TrackingOverlayCanvas
+                enabled={showTrackingOverlays}
+                layers={trackingLayers}
+                liveOverlays={trackingOverlays}
+                videoRef={videoRef}
+                videoTimeOffset={videoTimeOffset}
+              />
+            )}
+            {videoUrl && (
               <AnnotationOverlay
                 activeTool={activeTool}
                 annotations={annotations}
                 modelAnnotations={modelAnnotations}
-                trackingOverlays={showTrackingOverlays ? currentOverlay : []}
                 drawColor={drawColor}
                 isPaused={isPaused}
                 strokeWidth={strokeWidth}
@@ -1290,6 +1381,7 @@ export default function Home() {
                 onPushUndo={(entry) => setAnnotationUndoStack((prev) => [...prev, entry])}
               />
             )}
+            </div>
           </div>
         </section>
 
@@ -1299,13 +1391,31 @@ export default function Home() {
               <h2 className="op-card-title" style={{ margin: 0 }}>
                 Vision &amp; Tracking Engine
               </h2>
-              <button
-                type="button"
-                className="op-secondary-button"
-                onClick={() => setShowTranscript((current) => !current)}
-              >
-                {showTranscript ? "Hide Transcript" : "Show Transcript"}
-              </button>
+              <div className="op-inline-actions">
+                <button
+                  type="button"
+                  className="op-secondary-button"
+                  onClick={removeTracking}
+                  disabled={!trackingLayers.length}
+                >
+                  Clear Layers
+                </button>
+                <button
+                  type="button"
+                  className="op-secondary-button"
+                  onClick={restoreFullVideo}
+                  disabled={!originalVideoUrl || videoUrl === originalVideoUrl}
+                >
+                  Restore Full Video
+                </button>
+                <button
+                  type="button"
+                  className="op-secondary-button"
+                  onClick={() => setShowTranscript((current) => !current)}
+                >
+                  {showTranscript ? "Hide Transcript" : "Show Transcript"}
+                </button>
+              </div>
             </div>
             <label className="op-checkbox-row">
               <input
@@ -1321,7 +1431,7 @@ export default function Home() {
                 checked={showTrackingOverlays}
                 onChange={(event) => setShowTrackingOverlays(event.target.checked)}
               />
-              <span>Enable SAM3 Overlay</span>
+              <span>Show tracking layers</span>
             </label>
             <label className="op-checkbox-row">
               <input
@@ -1331,6 +1441,94 @@ export default function Home() {
               />
               <span>Send Annotated Snapshot</span>
             </label>
+            <div className="op-tracking-layer-panel">
+              <div className="op-tracking-layer-heading">
+                <strong>Tracking Layers</strong>
+                <div className="op-inline-actions">
+                  <button
+                    type="button"
+                    className="op-layer-action"
+                    disabled={!trackingLayers.length}
+                    onClick={() => setTrackingLayers((layers) => layers.map((layer) => ({ ...layer, visible: true })))}
+                  >
+                    Show all
+                  </button>
+                  <button
+                    type="button"
+                    className="op-layer-action"
+                    disabled={!trackingLayers.length}
+                    onClick={() => setTrackingLayers((layers) => layers.map((layer) => ({ ...layer, visible: false })))}
+                  >
+                    Hide all
+                  </button>
+                </div>
+              </div>
+              {!trackingLayers.length ? (
+                <p className="op-help-text">Completed SAM3 objects will appear here as removable layers.</p>
+              ) : (
+                Array.from(new Set(trackingLayers.map((layer) => layer.round)))
+                  .sort((a, b) => b - a)
+                  .map((round) => (
+                    <div className="op-tracking-round" key={`tracking-round-${round}`}>
+                      <span className="op-tracking-round-label">Round {round}</span>
+                      {trackingLayers
+                        .filter((layer) => layer.round === round)
+                        .map((layer) => (
+                          <div className="op-tracking-layer-row" key={layer.id}>
+                            <input
+                              type="checkbox"
+                              checked={layer.visible}
+                              aria-label={`Show ${layer.label}`}
+                              onChange={(event) =>
+                                setTrackingLayers((layers) =>
+                                  layers.map((candidate) =>
+                                    candidate.id === layer.id
+                                      ? { ...candidate, visible: event.target.checked }
+                                      : candidate
+                                  )
+                                )
+                              }
+                            />
+                            <input
+                              type="color"
+                              className="op-tracking-layer-color"
+                              value={layer.color}
+                              aria-label={`Color for ${layer.label}`}
+                              onChange={(event) =>
+                                setTrackingLayers((layers) =>
+                                  layers.map((candidate) =>
+                                    candidate.id === layer.id
+                                      ? {
+                                          ...candidate,
+                                          color: event.target.value,
+                                          overlays: candidate.overlays.map((overlay) => ({
+                                            ...overlay,
+                                            color: event.target.value,
+                                          })),
+                                        }
+                                      : candidate
+                                  )
+                                )
+                              }
+                            />
+                            <span className="op-tracking-layer-name" title={layer.label}>{layer.label}</span>
+                            <button
+                              type="button"
+                              className="op-tracking-layer-remove"
+                              aria-label={`Remove ${layer.label}`}
+                              title="Remove this tracking layer"
+                              onClick={() =>
+                                setTrackingLayers((layers) => layers.filter((candidate) => candidate.id !== layer.id))
+                              }
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        ))}
+                    </div>
+                  ))
+              )}
+            </div>
             <p className="op-help-text">
               Frame at {formatTimestamp(timestamp)}. Default payload sends the original frame plus
               annotation JSON; the annotated snapshot is optional.
@@ -1458,31 +1656,51 @@ export default function Home() {
           <div className="op-card">
             <div className="op-card-heading">
               <h2 className="op-card-title">Conversation</h2>
-              <button
-                type="button"
-                className="op-download-button"
-                onClick={downloadChat}
-                disabled={!chatMessages.length || loading}
-                title={
-                  loading
-                    ? "Wait for the current response to finish"
-                    : chatMessages.length
-                    ? "Download the entire conversation"
-                    : "Start a conversation before downloading"
-                }
-              >
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
-                  <path
-                    d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-                Download chat
-              </button>
+              <div className="op-inline-actions">
+                <button
+                  type="button"
+                  className="op-secondary-button"
+                  onClick={clearChatHistory}
+                  disabled={loading || (!chatMessages.length && !chatClearStatus)}
+                  title={
+                    loading
+                      ? "Wait for the current response to finish"
+                      : "Clear visible chat and backend conversation memory"
+                  }
+                >
+                  Clear Chat
+                </button>
+                <button
+                  type="button"
+                  className="op-download-button"
+                  onClick={downloadChat}
+                  disabled={!chatMessages.length || loading}
+                  title={
+                    loading
+                      ? "Wait for the current response to finish"
+                      : chatMessages.length
+                      ? "Download the entire conversation"
+                      : "Start a conversation before downloading"
+                  }
+                >
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+                    <path
+                      d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  Download chat
+                </button>
+              </div>
             </div>
+            {chatClearStatus && (
+              <p role="status" className="op-status-text" style={{ marginTop: -4, marginBottom: 10 }}>
+                {chatClearStatus}
+              </p>
+            )}
             <div className="op-chat-panel">
               <div className="op-chat-history">
                 {chatMessages.length ? (

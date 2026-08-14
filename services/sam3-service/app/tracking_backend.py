@@ -148,6 +148,7 @@ class Sam3TrackingBackend:
         self.config = config
         self._predictors: dict[str, Any] = {}
         self._model_lock = asyncio.Lock()
+        self._inference_lock = asyncio.Lock()
 
     def status(self) -> TrackingBackendStatus:
         if importlib.util.find_spec("ultralytics") is None:
@@ -195,8 +196,11 @@ class Sam3TrackingBackend:
             )
             return
 
-        async for update in self._track_in_worker(job, video_path):
-            yield update
+        # Ultralytics video predictors keep prompt and object memory on the predictor instance.
+        # Serialize jobs so resetting that per-run state cannot corrupt another active inference.
+        async with self._inference_lock:
+            async for update in self._track_in_worker(job, video_path):
+                yield update
 
     def _video_path(self, video_id: str) -> Path:
         return self.config.video_root / video_id / "source.mp4"
@@ -287,10 +291,12 @@ class Sam3TrackingBackend:
         job: TrackingJob,
         video_path: Path,
     ) -> Iterator[dict[str, Any]]:
+        reset_video_predictor_state(predictor)
         clip_path, frame_width, frame_height, clip_fps, clip_frame_count = self._clip_from_timestamp(video_path, job)
         boxes = annotation_boxes_xywh(job.annotations)
         prompt = job.segmentation_prompt or job.question
         rendered_path = self.config.rendered_video_root / f"{job.tracking_job_id}.mp4"
+        clean_path = self.config.rendered_video_root / f"{job.tracking_job_id}.clean.mp4"
         working_rendered_path = rendered_path.with_suffix(".working.mp4")
         rendered_path.parent.mkdir(parents=True, exist_ok=True)
         rendered_writer: Any = None
@@ -306,6 +312,7 @@ class Sam3TrackingBackend:
             for index, result in enumerate(results, start=1):
                 timestamp = job.timestamp + ((index - 1) / clip_fps)
                 rendered_frame = _render_result_mask(result)
+                frame_overlays = ultralytics_result_to_overlays(result, timestamp)
                 if rendered_frame is not None:
                     if rendered_writer is None:
                         import cv2
@@ -323,7 +330,7 @@ class Sam3TrackingBackend:
                 yield {
                     "done": False,
                     "progress": min(99, round((index / total) * 100)),
-                    "overlays": [],
+                    "overlays": frame_overlays,
                     "backend": self.name,
                 }
                 if self.config.max_frames > 0 and index >= self.config.max_frames:
@@ -335,6 +342,15 @@ class Sam3TrackingBackend:
         if rendered_writer is None or not working_rendered_path.exists():
             raise RuntimeError("SAM3 completed without producing a rendered tracking video.")
         _transcode_rendered_video(working_rendered_path, rendered_path)
+        try:
+            _encode_clean_video_slice(
+                video_path,
+                clean_path,
+                start_seconds=job.timestamp,
+                duration_seconds=clip_frame_count / clip_fps,
+            )
+        finally:
+            clip_path.unlink(missing_ok=True)
 
         yield {
             "done": True,
@@ -342,6 +358,7 @@ class Sam3TrackingBackend:
             "overlays": [],
             "backend": self.name,
             "rendered_video_path": str(rendered_path),
+            "clean_video_path": str(clean_path),
         }
 
     def _clip_from_timestamp(self, video_path: Path, job: TrackingJob) -> tuple[Path, int, int, float, int]:
@@ -487,6 +504,20 @@ def annotation_boxes_xywh(annotations: list[dict[str, Any]]) -> list[list[float]
     return boxes
 
 
+def reset_video_predictor_state(predictor: Any) -> None:
+    """Clear per-video SAM state while preserving loaded model weights."""
+    predictor.inference_state = {}
+    tracker = getattr(predictor, "tracker", None)
+    if tracker is not None and hasattr(tracker, "inference_state"):
+        tracker.inference_state = {}
+
+    # Remove queued geometric prompts, but retain model text embeddings. Keeping
+    # embeddings is important when two independent rounds intentionally use the
+    # same text; add_prompt will replace them when the requested text changes.
+    if hasattr(predictor, "prompts"):
+        predictor.prompts = {}
+
+
 def outputs_to_overlays(outputs: Any, timestamp: float) -> list[dict[str, Any]]:
     if not isinstance(outputs, dict):
         return []
@@ -539,7 +570,7 @@ def ultralytics_result_to_overlays(
             ):
                 overlays.append(
                     {
-                        "track_id": f"sam3-{obj_id}-contour-{contour_index + 1}",
+                        "track_id": f"sam3-{obj_id}",
                         "label": _overlay_label(obj_id, score),
                         "color": DEFAULT_OVERLAY_COLOR,
                         "timestamp": timestamp,
@@ -654,6 +685,52 @@ def _transcode_rendered_video(input_path: Path, output_path: Path) -> None:
         message = completed.stderr.strip() or "FFmpeg did not create an output file."
         raise RuntimeError(f"Unable to encode browser-compatible SAM3 video: {message}")
     input_path.unlink(missing_ok=True)
+
+
+def _encode_clean_video_slice(
+    input_path: Path,
+    output_path: Path,
+    *,
+    start_seconds: float,
+    duration_seconds: float,
+) -> None:
+    ffmpeg = os.getenv("FFMPEG_BINARY", "ffmpeg")
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        f"{max(0.0, start_seconds):.6f}",
+        "-i",
+        str(input_path),
+        "-t",
+        f"{max(0.001, duration_seconds):.6f}",
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0 or not output_path.is_file():
+        message = completed.stderr.strip() or "FFmpeg did not create an output file."
+        raise RuntimeError(f"Unable to encode clean tracking clip: {message}")
 
 
 def _downsample_points(

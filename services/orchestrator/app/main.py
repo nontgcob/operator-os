@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import secrets
+import sqlite3
 import time
 import asyncio
 from typing import Any
@@ -51,7 +52,10 @@ VIDEO_SERVICE_URL = os.getenv("VIDEO_SERVICE_URL", "http://localhost:8002")
 SAM3_SERVICE_URL = os.getenv("SAM3_SERVICE_URL", "http://localhost:8003")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 USE_REDIS_STATE = os.getenv("USE_REDIS_STATE", "false").lower() == "true"
-CHAT_LOG_PATH = os.getenv("CHAT_LOG_PATH", "./data/chat-logs/chat-conversations.jsonl")
+CHAT_ANALYTICS_DB_PATH = os.getenv(
+    "CHAT_ANALYTICS_DB_PATH",
+    os.getenv("CHAT_LOG_DB_PATH", "./data/chat-logs/chat-analytics.sqlite3"),
+)
 RAG_COMPARISON_DB_PATH = os.getenv(
     "RAG_COMPARISON_DB_PATH",
     "./data/rag-comparisons/comparisons.sqlite3",
@@ -91,6 +95,9 @@ class _MemoryState:
     def setex(self, key: str, ttl: int, value: str) -> None:
         self._values[key] = (time.time() + ttl, value)
 
+    def delete(self, key: str) -> int:
+        return 1 if self._values.pop(key, None) is not None else 0
+
 
 def _build_state_client() -> Any:
     if not USE_REDIS_STATE:
@@ -103,7 +110,7 @@ def _build_state_client() -> Any:
 
 
 state_client = _build_state_client()
-chat_log = ChatLog(CHAT_LOG_PATH)
+chat_log = ChatLog(CHAT_ANALYTICS_DB_PATH)
 comparison_store = ComparisonStore(RAG_COMPARISON_DB_PATH)
 
 
@@ -129,7 +136,7 @@ def _record_chat_message(
             status=status,
             context=context,
         )
-    except OSError as exc:
+    except (OSError, sqlite3.Error) as exc:
         # Chat logging must never make inference unavailable.
         _log_event(
             "chat_log_failed",
@@ -137,6 +144,43 @@ def _record_chat_message(
             exchange_id=exchange_id,
             error=str(exc),
         )
+
+
+def _record_analytics_event(
+    event_type: str,
+    *,
+    session_id: str | None = None,
+    exchange_id: str | None = None,
+    video_id: str | None = None,
+    tracking_job_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    try:
+        chat_log.append_event(
+            event_type=event_type,
+            session_id=session_id,
+            exchange_id=exchange_id,
+            video_id=video_id,
+            tracking_job_id=tracking_job_id,
+            payload=payload,
+        )
+    except (OSError, sqlite3.Error) as exc:
+        _log_event(
+            "analytics_log_failed",
+            event_type=event_type,
+            session_id=session_id,
+            error=str(exc),
+        )
+
+
+def _data_url_summary(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {"present": False}
+    return {
+        "present": True,
+        "bytes": len(value.encode("utf-8")),
+        "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+    }
 
 
 def _sse(payload: str, event: str | None = None) -> str:
@@ -740,6 +784,10 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
         "model": payload.model,
         "document_ids": payload.document_ids,
         "annotation_count": len(payload.annotations),
+        "annotations": payload.annotations,
+        "transcript_window": payload.transcript_window.model_dump(),
+        "frame_data_url": _data_url_summary(payload.frame_data_url),
+        "annotated_frame_data_url": _data_url_summary(payload.annotated_frame_data_url),
         "annotated_snapshot_sent": payload.annotated_frame_data_url is not None,
     }
     _record_chat_message(
@@ -867,6 +915,21 @@ async def tracking_start(payload: TrackingStartRequest) -> dict[str, str]:
             )
         if response.status_code >= 400:
             raise HTTPException(status_code=response.status_code, detail=response.text)
+    _record_analytics_event(
+        "tracking_started",
+        session_id=payload.session_id,
+        video_id=payload.video_id,
+        tracking_job_id=tracking_job_id,
+        payload={
+            "video_timestamp_seconds": payload.timestamp,
+            "question": payload.question,
+            "segmentation_prompt": segmentation_prompt,
+            "annotation_count": len(payload.annotations),
+            "annotations": payload.annotations,
+            "frame_data_url": _data_url_summary(payload.frame_data_url),
+            "use_worker_queue": use_worker,
+        },
+    )
     _log_event("tracking_started", tracking_job_id=tracking_job_id, session_id=payload.session_id)
     return {"tracking_job_id": tracking_job_id}
 
@@ -906,8 +969,7 @@ async def tracking_events(tracking_job_id: str) -> StreamingResponse:
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-@app.get("/tracking/video/{tracking_job_id}")
-async def tracking_video(tracking_job_id: str, request: Request) -> StreamingResponse:
+async def _proxy_tracking_video(upstream_path: str, request: Request) -> StreamingResponse:
     headers = {}
     if range_header := request.headers.get("range"):
         headers["Range"] = range_header
@@ -915,7 +977,7 @@ async def tracking_video(tracking_job_id: str, request: Request) -> StreamingRes
     upstream = await client.send(
         client.build_request(
             "GET",
-            f"{SAM3_SERVICE_URL}/tracking/video/{tracking_job_id}",
+            f"{SAM3_SERVICE_URL}{upstream_path}",
             headers=headers,
         ),
         stream=True,
@@ -947,6 +1009,25 @@ async def tracking_video(tracking_job_id: str, request: Request) -> StreamingRes
     )
 
 
+@app.get("/tracking/video/{tracking_job_id}")
+async def tracking_video(tracking_job_id: str, request: Request) -> StreamingResponse:
+    return await _proxy_tracking_video(f"/tracking/video/{tracking_job_id}", request)
+
+
+@app.get("/tracking/clean-video/{tracking_job_id}")
+async def clean_tracking_video(tracking_job_id: str, request: Request) -> StreamingResponse:
+    return await _proxy_tracking_video(f"/tracking/clean-video/{tracking_job_id}", request)
+
+
+@app.get("/tracking/overlays/{tracking_job_id}")
+async def tracking_overlays(tracking_job_id: str) -> Response:
+    async with httpx.AsyncClient(timeout=30) as client:
+        upstream = await client.get(f"{SAM3_SERVICE_URL}/tracking/overlays/{tracking_job_id}")
+    if upstream.status_code >= 400:
+        raise HTTPException(status_code=upstream.status_code, detail=upstream.text)
+    return Response(content=upstream.content, media_type="application/json")
+
+
 def _load_conversation(session_id: str) -> list[dict[str, str]]:
     raw = state_client.get(f"conversation:{session_id}")
     if not raw:
@@ -958,3 +1039,14 @@ def _append_conversation(session_id: str, question: str, answer: str) -> None:
     current = _load_conversation(session_id)
     updated = append_rolling_conversation(current, question, answer, max_messages=12)
     state_client.setex(f"conversation:{session_id}", 3600, json.dumps(updated))
+
+
+@app.delete("/chat/session/{session_id}")
+async def clear_chat_session(session_id: str) -> dict[str, Any]:
+    deleted = state_client.delete(f"conversation:{session_id}")
+    _record_analytics_event(
+        "chat_memory_cleared",
+        session_id=session_id,
+        payload={"deleted": int(deleted or 0)},
+    )
+    return {"session_id": session_id, "cleared": True}

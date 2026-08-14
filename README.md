@@ -16,7 +16,7 @@ The current version is a local development/demo system. It is designed to prepar
 - Expects the VLM to return structured JSON containing the answer, visual annotations, an optional SAM3 tracking prompt, and optional tracking annotations.
 - Renders model-generated annotations over the paused video frame.
 - Starts SAM3 tracking when the user explicitly asks for tracking, when automatic tracking is enabled, or when the VLM returns a tracking target.
-- Produces a browser-playable H.264 MP4 tracking clip with segmentation masks baked into the video frames.
+- Stores frame-by-frame SAM3 mask polygons as independently visible tracking layers over the clean video, while retaining a rendered H.264 fallback artifact.
 
 ## How It Works
 
@@ -40,7 +40,7 @@ flowchart TD
 
     I["8. SAM3 Segmentation And Tracking<br/><br/>Orchestrator calls the SAM3 service<br/>SAM3 clips the source video from the paused timestamp<br/>Box-prompted SAM3 runs when a usable box exists<br/>Text-prompted SAM3 runs when only a description exists<br/>SAM3 segments and tracks the target frame by frame"]
 
-    J["9. Tracking Video Output<br/><br/>Segmentation mask is blended into every processed frame<br/>FFmpeg converts the result to browser-playable H.264 MP4<br/>Frontend switches the player to the generated clip<br/>Clip time 0:00 maps back to the original paused timestamp"]
+    J["9. Tracking Layer Output<br/><br/>Masks are stored with stable object IDs and source timestamps<br/>Frontend adds each object as a removable canvas layer<br/>Multiple tracking rounds remain independently visible<br/>A rendered H.264 artifact remains available as a fallback"]
 
     A --> B --> C --> D --> E --> F
     F -- "No" --> G
@@ -59,7 +59,7 @@ flowchart TD
 8. The RAGVLM service sends the prompt, frame image, optional annotated image, selected PDF files, transcript window, and conversation context to the selected VLM.
 9. The VLM returns a structured answer with optional visual annotations and optional tracking instructions.
 10. The frontend displays the answer and overlays the model's visual annotations.
-11. If tracking is requested or enabled, SAM3 generates a processed video clip with the target highlighted.
+11. If tracking is requested or enabled, SAM3 stores the target masks and the frontend adds each tracked object to the layer checklist.
 
 ## Current Architecture
 
@@ -78,7 +78,7 @@ The paused frame is captured by the browser from the actual video player at the 
 
 SAM3 does not depend on the VLM returning a perfect bounding box. If the VLM returns `tracking_annotations`, OperatorOS can convert those into box prompts. If no usable box exists, it can use the VLM's `tracking_prompt`, or the user's original tracking request, as a text prompt.
 
-The current SAM3 output is a new processed clip, not a live browser polygon overlay. The generated clip begins at the source timestamp where the user asked for tracking. The frontend stores that offset so later transcript lookups still map back to the original video time.
+The primary SAM3 output is now a non-destructive set of frame-synchronized polygon layers over the clean source video. Each tracking round appends independently selectable objects, so earlier tracks can be hidden or removed without rerunning later rounds. The service still creates rendered and clean clip artifacts as compatibility fallbacks.
 
 ## Quick Start
 
@@ -95,7 +95,8 @@ The current SAM3 output is a new processed clip, not a live browser polygon over
    npm run dev
    ```
 
-4. Open `http://localhost:3000`.
+4. Open the local URL printed by Next.js (normally `http://localhost:3000`; if
+   that port is already occupied, Next.js automatically selects the next one).
 
 Docker Compose is still available:
 
@@ -149,8 +150,8 @@ The diagnostic should show CUDA available, the expected GPU, and an existing `mo
 
 ## Current Limitations
 
-- Generated SAM3 tracking clips currently do not preserve original audio.
-- The player switches to the processed tracking clip instead of showing one combined video with the unchanged prefix plus tracked suffix.
+- Rendered fallback tracking clips currently do not preserve original audio; interactive layer playback uses the clean source video and keeps its audio.
+- Overlay manifests are currently stored as one JSON file per job; very long or object-heavy videos may require chunked or compressed mask storage.
 - Long, high-frame-rate videos can take significant time to process.
 - Generated tracking videos are stored locally; automatic cleanup is not yet implemented.
 - Manual understanding depends on the selected VLM's native PDF-reading ability.

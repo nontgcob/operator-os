@@ -4,6 +4,7 @@ import type {
   DocumentIngestResponse,
   DocumentStatusResponse,
   MediaIngestResponse,
+  TrackingOverlayManifest,
   TranscriptWindowResponse,
   VideoMetadataResponse,
 } from "@/lib/types";
@@ -147,6 +148,15 @@ export async function askQuestion(input: {
   });
 }
 
+export async function clearChatSession(sessionId: string): Promise<void> {
+  const response = await fetch(`${BASE_URL}/chat/session/${encodeURIComponent(sessionId)}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+}
+
 export async function askComparison(input: {
   session_id: string;
   video_id?: string;
@@ -218,6 +228,14 @@ export async function startTracking(input: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+  return response.json();
+}
+
+export async function getTrackingOverlays(trackingJobId: string): Promise<TrackingOverlayManifest> {
+  const response = await fetch(`${BASE_URL}/tracking/overlays/${encodeURIComponent(trackingJobId)}`);
   if (!response.ok) {
     throw new Error(await readApiError(response));
   }
