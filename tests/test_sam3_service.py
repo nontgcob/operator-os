@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 import json
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +27,10 @@ class FakeRedis:
 
     def setex(self, key: str, ttl: int, value: str) -> None:
         self.values[key] = (ttl, value)
+
+    def get(self, key: str) -> str | None:
+        item = self.values.get(key)
+        return item[1] if item else None
 
 
 def _load_sam3_main() -> Any:
@@ -103,6 +108,59 @@ def test_completed_tracking_persists_a_fetchable_overlay_manifest(monkeypatch, t
     assert len(manifest["overlays"]) == 2
 
 
+def test_tracking_cancel_sets_signal_and_persists_cancelled_status() -> None:
+    module = _load_sam3_main()
+    fake_redis = FakeRedis()
+    module.state_client = fake_redis
+    cancel_event = threading.Event()
+    module._tracking_cancel_events["job-1"] = cancel_event
+    fake_redis.setex(
+        "tracking:job-1",
+        3600,
+        json.dumps(
+            {
+                "tracking_job_id": "job-1",
+                "done": False,
+                "backend": "sam3",
+                "target_progress": [
+                    {
+                        "target_id": "target-1",
+                        "label": "Lever",
+                        "progress": 42,
+                        "stage": "tracking",
+                        "color": "#facc15",
+                    }
+                ],
+            }
+        ),
+    )
+
+    response = TestClient(module.app).post("/tracking/cancel/job-1")
+
+    assert response.status_code == 200
+    assert cancel_event.is_set()
+    payload = response.json()
+    assert payload["done"] is True
+    assert payload["cancelled"] is True
+    assert payload["stage"] == "cancelled"
+
+
+def test_simulation_backend_stops_when_cancelled() -> None:
+    cancel_event = threading.Event()
+    cancel_event.set()
+    job = tracking_backend.TrackingJob(**_tracking_request(), cancel_event=cancel_event)
+    runner = tracking_backend.SimulationTrackingBackend(steps=3, delay_seconds=0)
+
+    async def collect() -> list[dict[str, Any]]:
+        return [update async for update in runner.track(job)]
+
+    updates = asyncio.run(collect())
+
+    assert len(updates) == 1
+    assert updates[0]["cancelled"] is True
+    assert updates[0]["done"] is True
+
+
 def test_simulation_backend_requires_explicit_fallback_flag() -> None:
     disabled = tracking_backend.build_tracking_backend(
         tracking_backend.TrackingBackendConfig(
@@ -138,7 +196,8 @@ def test_simulation_overlay_payload_shape() -> None:
     assert final_payload["done"] is True
     assert final_payload["progress"] == 100
     overlay = final_payload["overlays"][0]
-    assert set(overlay) == {"track_id", "label", "color", "timestamp", "points"}
+    assert {"track_id", "label", "color", "timestamp", "points"}.issubset(overlay)
+    assert overlay["target_id"] == "target-1"
     assert len(overlay["points"]) == 4
     assert all({"x", "y"} == set(point) for point in overlay["points"])
 
@@ -208,3 +267,32 @@ def test_disconnected_mask_regions_become_separate_polygons() -> None:
         for point in overlay["points"]
         for axis in ("x", "y")
     )
+
+
+def test_semantic_class_metadata_keeps_target_identity_stable() -> None:
+    mask = np.ones((8, 8), dtype=np.float32)
+    targets = [
+        {"id": "person", "label": "Seated man", "prompt": "man on stool", "annotations": []},
+        {"id": "ams", "label": "AMS unit", "prompt": "black AMS unit", "annotations": []},
+    ]
+    result = SimpleNamespace(
+        orig_shape=(8, 8),
+        masks=SimpleNamespace(data=np.asarray([mask, mask])),
+        boxes=SimpleNamespace(
+            conf=np.asarray([0.9, 0.8]),
+            id=np.asarray([17, 3]),
+            cls=np.asarray([1, 0]),
+            xyxy=None,
+        ),
+    )
+
+    overlays = tracking_backend.ultralytics_result_to_overlays(
+        result, timestamp=2.0, targets=targets
+    )
+
+    assert {overlay["target_id"] for overlay in overlays} == {"person", "ams"}
+    ams_overlay = next(overlay for overlay in overlays if overlay["target_id"] == "ams")
+    assert ams_overlay["label"] == "AMS unit"
+    assert ams_overlay["class_id"] == 1
+    assert ams_overlay["track_id"] == "ams:sam3-17"
+    assert ams_overlay["target_color"] == "#67A552"

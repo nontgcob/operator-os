@@ -1,4 +1,4 @@
-import type { TrackingLayer, TrackingOverlay } from "@/lib/types";
+import type { Annotation, TrackingLayer, TrackingOverlay, TrackingTarget } from "@/lib/types";
 
 export const TRACKING_LAYER_COLORS = [
   "#22c55e",
@@ -17,6 +17,41 @@ function compactLabel(value: string) {
   return normalized.length > 56 ? `${normalized.slice(0, 53)}...` : normalized;
 }
 
+function validTrackingColor(value: unknown): value is string {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
+}
+
+export function colorizeTrackingTargets(input: {
+  targets: TrackingTarget[];
+  annotations: Annotation[];
+  colorOffset?: number;
+}): TrackingTarget[] {
+  return input.targets.map((target, index) => {
+    const targetAnnotationColor = target.annotations.find((annotation) =>
+      validTrackingColor(annotation.color)
+    )?.color;
+    const explanatoryColor = input.annotations[index]?.color;
+    const color = validTrackingColor(target.color)
+      ? target.color
+      : validTrackingColor(targetAnnotationColor)
+        ? targetAnnotationColor
+        : validTrackingColor(explanatoryColor)
+          ? explanatoryColor
+          : TRACKING_LAYER_COLORS[
+              ((input.colorOffset ?? 0) + index) % TRACKING_LAYER_COLORS.length
+            ];
+    return {
+      ...target,
+      color,
+      annotations: target.annotations.map((annotation) => ({
+        ...annotation,
+        color,
+        tracking_target_id: target.id,
+      })),
+    };
+  });
+}
+
 export function createTrackingLayers(input: {
   jobId: string;
   round: number;
@@ -26,20 +61,26 @@ export function createTrackingLayers(input: {
 }): TrackingLayer[] {
   const grouped = new Map<string, TrackingOverlay[]>();
   for (const overlay of input.overlays) {
-    const existing = grouped.get(overlay.track_id) ?? [];
+    const groupId = overlay.target_id || overlay.track_id;
+    const existing = grouped.get(groupId) ?? [];
     existing.push(overlay);
-    grouped.set(overlay.track_id, existing);
+    grouped.set(groupId, existing);
   }
 
   const baseLabel = compactLabel(input.prompt);
   const multipleObjects = grouped.size > 1;
-  return Array.from(grouped.entries()).map(([trackId, overlays], index) => {
-    const color = TRACKING_LAYER_COLORS[((input.colorOffset ?? 0) + index) % TRACKING_LAYER_COLORS.length];
+  return Array.from(grouped.entries()).map(([groupId, overlays], index) => {
+    const targetColor = overlays.find((overlay) => validTrackingColor(overlay.target_color))?.target_color;
+    const color = validTrackingColor(targetColor)
+      ? targetColor
+      : TRACKING_LAYER_COLORS[((input.colorOffset ?? 0) + index) % TRACKING_LAYER_COLORS.length];
+    const targetLabel = overlays.find((overlay) => overlay.target_label)?.target_label;
     return {
-      id: `${input.jobId}:${trackId}`,
+      id: `${input.jobId}:${groupId}`,
       jobId: input.jobId,
+      targetId: overlays[0]?.target_id,
       round: input.round,
-      label: multipleObjects ? `${baseLabel} - Object ${index + 1}` : baseLabel,
+      label: targetLabel ? compactLabel(targetLabel) : multipleObjects ? `${baseLabel} - Object ${index + 1}` : baseLabel,
       color,
       visible: true,
       overlays: overlays

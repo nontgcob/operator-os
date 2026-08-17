@@ -45,6 +45,7 @@ export interface Annotation {
   x2?: number;
   y2?: number;
   d?: string;
+  tracking_target_id?: string;
 }
 
 export type AnnotationUndoEntry =
@@ -130,8 +131,34 @@ export interface ComparisonAnswer {
   annotations: Annotation[];
   tracking_prompt?: string;
   tracking_annotations: Annotation[];
+  tracking_targets?: TrackingTarget[];
   error?: string;
   pipeline?: string;
+}
+
+export interface TrackingTarget {
+  id: string;
+  label: string;
+  prompt: string;
+  annotations: Annotation[];
+  color?: string;
+}
+
+export type TrackingProgressStage =
+  | "queued"
+  | "preparing"
+  | "tracking"
+  | "finalizing"
+  | "complete"
+  | "cancelled"
+  | "error";
+
+export interface TrackingTargetProgress {
+  target_id: string;
+  label: string;
+  progress: number;
+  stage: TrackingProgressStage;
+  color: string;
 }
 
 export interface ComparisonTurn {
@@ -159,6 +186,10 @@ export interface ComparisonRevealResponse {
 
 export interface TrackingOverlay {
   track_id: string;
+  target_id?: string;
+  target_label?: string;
+  target_color?: string;
+  class_id?: number;
   label: string;
   color: string;
   points: Point[];
@@ -174,6 +205,7 @@ export interface TrackingOverlayManifest {
 export interface TrackingLayer {
   id: string;
   jobId: string;
+  targetId?: string;
   round: number;
   label: string;
   color: string;

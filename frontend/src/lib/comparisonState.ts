@@ -13,6 +13,7 @@ export function emptyComparisonAnswer(label: AnswerLabel): ComparisonAnswer {
     citations: [],
     annotations: [],
     tracking_annotations: [],
+    tracking_targets: [],
   };
 }
 
@@ -43,6 +44,9 @@ function sanitizeAnswer(
     tracking_annotations: Array.isArray(update.tracking_annotations)
       ? update.tracking_annotations
       : current.tracking_annotations,
+    tracking_targets: Array.isArray(update.tracking_targets)
+      ? update.tracking_targets
+      : current.tracking_targets,
     error: update.error,
     // A pipeline identity received before reveal is ignored defensively.
     pipeline: undefined,

@@ -5,6 +5,7 @@ import type {
   DocumentStatusResponse,
   MediaIngestResponse,
   TrackingOverlayManifest,
+  TrackingTarget,
   TranscriptWindowResponse,
   VideoMetadataResponse,
 } from "@/lib/types";
@@ -222,6 +223,7 @@ export async function startTracking(input: {
   question: string;
   segmentation_prompt?: string;
   annotations: Annotation[];
+  targets?: TrackingTarget[];
 }): Promise<{ tracking_job_id: string }> {
   const response = await fetch(`${BASE_URL}/tracking/start`, {
     method: "POST",
@@ -232,6 +234,16 @@ export async function startTracking(input: {
     throw new Error(await readApiError(response));
   }
   return response.json();
+}
+
+export async function cancelTracking(trackingJobId: string): Promise<void> {
+  const response = await fetch(
+    `${BASE_URL}/tracking/cancel/${encodeURIComponent(trackingJobId)}`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
 }
 
 export async function getTrackingOverlays(trackingJobId: string): Promise<TrackingOverlayManifest> {

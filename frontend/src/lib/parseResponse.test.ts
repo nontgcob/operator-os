@@ -16,6 +16,16 @@ describe("parseModelResponse", () => {
           { type: "rect", x: 200, y: 220, width: 90, height: 40, color: "#ff0000" },
           { type: "rect", x: 100, y: 120, width: -5, height: 30, color: "#00ff00" },
         ],
+        tracking_targets: [
+          {
+            label: "Red handle",
+            prompt: "red emergency handle",
+            annotations: [
+              { type: "rect", x: 200, y: 220, width: 90, height: 40, color: "#ff0000" },
+            ],
+          },
+          { label: "", prompt: "invalid target", annotations: [] },
+        ],
       })
     );
 
@@ -37,5 +47,15 @@ describe("parseModelResponse", () => {
       width: 90,
       height: 40,
     });
+    expect(parsed.trackingTargets).toEqual([
+      {
+        id: "target-1",
+        label: "Red handle",
+        prompt: "red emergency handle",
+        annotations: [
+          expect.objectContaining({ type: "rect", x: 200, y: 220, width: 90, height: 40 }),
+        ],
+      },
+    ]);
   });
 });

@@ -252,6 +252,7 @@ class TrackingStartRequest(BaseModel):
     question: str
     segmentation_prompt: str | None = None
     annotations: list[dict[str, Any]] = Field(default_factory=list)
+    targets: list[dict[str, Any]] = Field(default_factory=list)
 
 
 async def _youtube_url_from_request(request: Request, form_value: str | None = None) -> str | None:
@@ -554,6 +555,7 @@ def _comparison_answer_payload(answer: Any) -> dict[str, Any]:
             "annotations": [],
             "tracking_prompt": "",
             "tracking_annotations": [],
+            "tracking_targets": [],
             "error": "Pipeline returned an invalid response.",
         }
     normalized = dict(answer)
@@ -570,6 +572,7 @@ def _comparison_answer_payload(answer: Any) -> dict[str, Any]:
     normalized.setdefault("annotations", [])
     normalized.setdefault("tracking_prompt", "")
     normalized.setdefault("tracking_annotations", [])
+    normalized.setdefault("tracking_targets", [])
     normalized.setdefault("error", None)
     if isinstance(normalized["citations"], list):
         citations: list[dict[str, Any]] = []
@@ -904,7 +907,25 @@ async def tracking_start(payload: TrackingStartRequest) -> dict[str, str]:
         state_client.setex(
             f"tracking:{tracking_job_id}",
             3600,
-            json.dumps({"tracking_job_id": tracking_job_id, "done": False, "progress": 0, "overlays": []}),
+            json.dumps(
+                {
+                    "tracking_job_id": tracking_job_id,
+                    "done": False,
+                    "progress": 0,
+                    "stage": "queued",
+                    "target_progress": [
+                        {
+                            "target_id": target.get("id") or f"target-{index + 1}",
+                            "label": target.get("label") or "Tracked object",
+                            "progress": 0,
+                            "stage": "queued",
+                            "color": target.get("color") or "#67A552",
+                        }
+                        for index, target in enumerate(payload.targets)
+                    ],
+                    "overlays": [],
+                }
+            ),
         )
         _enqueue_tracking_job(job_payload)
     else:
@@ -926,6 +947,7 @@ async def tracking_start(payload: TrackingStartRequest) -> dict[str, str]:
             "segmentation_prompt": segmentation_prompt,
             "annotation_count": len(payload.annotations),
             "annotations": payload.annotations,
+            "targets": payload.targets,
             "frame_data_url": _data_url_summary(payload.frame_data_url),
             "use_worker_queue": use_worker,
         },
@@ -955,7 +977,7 @@ async def tracking_events(tracking_job_id: str) -> StreamingResponse:
 
     async def stream() -> Any:
         last_payload = ""
-        for _ in range(120):
+        for _ in range(3600):
             payload = state_client.get(f"tracking:{tracking_job_id}")
             if payload and payload != last_payload:
                 yield f"data: {payload}\n\n"
@@ -967,6 +989,39 @@ async def tracking_events(tracking_job_id: str) -> StreamingResponse:
         yield "data: {\"done\": true, \"overlays\": []}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.post("/tracking/cancel/{tracking_job_id}")
+async def cancel_tracking(tracking_job_id: str) -> Response:
+    use_worker = os.getenv("USE_WORKER_QUEUE", "false").lower() == "true"
+    async with httpx.AsyncClient(timeout=30) as client:
+        upstream = await client.post(f"{SAM3_SERVICE_URL}/tracking/cancel/{tracking_job_id}")
+    if upstream.status_code >= 400 and not (use_worker and upstream.status_code == 404):
+        raise HTTPException(status_code=upstream.status_code, detail=upstream.text)
+    response_content = upstream.content
+    if use_worker:
+        current_raw = state_client.get(f"tracking:{tracking_job_id}")
+        if not current_raw:
+            raise HTTPException(status_code=404, detail="Tracking job was not found or expired")
+        current = json.loads(current_raw)
+        cancelled = {
+            "tracking_job_id": tracking_job_id,
+            "done": True,
+            "cancelled": True,
+            "progress": 0,
+            "stage": "cancelled",
+            "target_progress": [
+                {**target, "progress": 0, "stage": "cancelled"}
+                for target in current.get("target_progress", [])
+            ],
+            "overlays": [],
+            "backend": current.get("backend") or "worker",
+        }
+        state_client.setex(f"tracking:{tracking_job_id}", 3600, json.dumps(cancelled))
+        response_content = json.dumps(cancelled).encode()
+    _record_analytics_event("tracking_cancelled", tracking_job_id=tracking_job_id)
+    _log_event("tracking_cancelled", tracking_job_id=tracking_job_id)
+    return Response(content=response_content, media_type="application/json")
 
 
 async def _proxy_tracking_video(upstream_path: str, request: Request) -> StreamingResponse:

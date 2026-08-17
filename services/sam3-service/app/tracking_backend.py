@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Protocol
@@ -32,6 +33,8 @@ class TrackingJob:
     question: str
     segmentation_prompt: str = ""
     annotations: list[dict[str, Any]] = field(default_factory=list)
+    targets: list[dict[str, Any]] = field(default_factory=list)
+    cancel_event: threading.Event | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -122,11 +125,18 @@ class SimulationTrackingBackend:
 
     async def track(self, job: TrackingJob) -> AsyncIterator[dict[str, Any]]:
         overlays: list[dict[str, Any]] = []
+        targets = normalized_tracking_targets(job)
         for step in range(1, self.steps + 1):
-            overlays.extend(_simulated_overlay(job.timestamp + (step * 0.5), float(step)))
+            if tracking_cancel_requested(job):
+                yield tracking_cancelled_payload(self.name, targets)
+                return
+            overlays.extend(_simulated_overlay(job.timestamp + (step * 0.5), float(step), targets[0]))
+            progress = min(99, round((step / self.steps) * 100))
             yield {
                 "done": False,
-                "progress": min(99, round((step / self.steps) * 100)),
+                "progress": progress,
+                "stage": "tracking",
+                "target_progress": tracking_target_progress(targets, progress, "tracking"),
                 "overlays": overlays,
                 "backend": self.name,
             }
@@ -136,6 +146,8 @@ class SimulationTrackingBackend:
         yield {
             "done": True,
             "progress": 100,
+            "stage": "complete",
+            "target_progress": tracking_target_progress(targets, 100, "complete"),
             "overlays": overlays,
             "backend": self.name,
         }
@@ -178,6 +190,9 @@ class Sam3TrackingBackend:
         return TrackingBackendStatus(backend=self.name, ready=True)
 
     async def track(self, job: TrackingJob) -> AsyncIterator[dict[str, Any]]:
+        if tracking_cancel_requested(job):
+            yield tracking_cancelled_payload(self.name, normalized_tracking_targets(job))
+            return
         status = self.status()
         if not status.ready:
             yield tracking_error_payload(
@@ -199,6 +214,9 @@ class Sam3TrackingBackend:
         # Ultralytics video predictors keep prompt and object memory on the predictor instance.
         # Serialize jobs so resetting that per-run state cannot corrupt another active inference.
         async with self._inference_lock:
+            if tracking_cancel_requested(job):
+                yield tracking_cancelled_payload(self.name, normalized_tracking_targets(job))
+                return
             async for update in self._track_in_worker(job, video_path):
                 yield update
 
@@ -246,7 +264,9 @@ class Sam3TrackingBackend:
 
         async def load_model() -> Any:
             try:
-                predictor_type = "boxes" if annotation_boxes_xywh(job.annotations) else "text"
+                targets = normalized_tracking_targets(job)
+                target_annotations = targets[0]["annotations"] if len(targets) == 1 else []
+                predictor_type = "boxes" if annotation_boxes_xywh(target_annotations) else "text"
                 return await self._load_predictor(predictor_type)
             except Exception as exc:  # pragma: no cover - depends on external SAM3 runtime.
                 return exc
@@ -292,9 +312,17 @@ class Sam3TrackingBackend:
         video_path: Path,
     ) -> Iterator[dict[str, Any]]:
         reset_video_predictor_state(predictor)
+        targets = normalized_tracking_targets(job)
+        yield {
+            "done": False,
+            "progress": 0,
+            "stage": "preparing",
+            "target_progress": tracking_target_progress(targets, 0, "preparing"),
+            "overlays": [],
+            "backend": self.name,
+        }
         clip_path, frame_width, frame_height, clip_fps, clip_frame_count = self._clip_from_timestamp(video_path, job)
-        boxes = annotation_boxes_xywh(job.annotations)
-        prompt = job.segmentation_prompt or job.question
+        boxes = annotation_boxes_xywh(targets[0]["annotations"]) if len(targets) == 1 else []
         rendered_path = self.config.rendered_video_root / f"{job.tracking_job_id}.mp4"
         clean_path = self.config.rendered_video_root / f"{job.tracking_job_id}.clean.mp4"
         working_rendered_path = rendered_path.with_suffix(".working.mp4")
@@ -305,14 +333,18 @@ class Sam3TrackingBackend:
             pixel_boxes = [_xywh_unit_to_xyxy_pixels(box, frame_width, frame_height) for box in boxes]
             results = predictor(source=str(clip_path), bboxes=pixel_boxes, stream=True)
         else:
-            results = predictor(source=str(clip_path), text=[prompt], stream=True)
+            results = predictor(source=str(clip_path), text=[target["prompt"] for target in targets], stream=True)
 
         total = max(1, clip_frame_count)
+        cancelled = False
         try:
             for index, result in enumerate(results, start=1):
+                if tracking_cancel_requested(job):
+                    cancelled = True
+                    break
                 timestamp = job.timestamp + ((index - 1) / clip_fps)
                 rendered_frame = _render_result_mask(result)
-                frame_overlays = ultralytics_result_to_overlays(result, timestamp)
+                frame_overlays = ultralytics_result_to_overlays(result, timestamp, targets=targets)
                 if rendered_frame is not None:
                     if rendered_writer is None:
                         import cv2
@@ -327,21 +359,51 @@ class Sam3TrackingBackend:
                         if not rendered_writer.isOpened():
                             raise RuntimeError(f"Unable to create rendered SAM3 video: {working_rendered_path}")
                     rendered_writer.write(rendered_frame)
+                progress = min(99, round((index / total) * 100))
                 yield {
                     "done": False,
-                    "progress": min(99, round((index / total) * 100)),
+                    "progress": progress,
+                    "stage": "tracking",
+                    "target_progress": tracking_target_progress(targets, progress, "tracking"),
                     "overlays": frame_overlays,
                     "backend": self.name,
                 }
                 if self.config.max_frames > 0 and index >= self.config.max_frames:
                     break
         finally:
+            close_results = getattr(results, "close", None)
+            if callable(close_results):
+                close_results()
             if rendered_writer is not None:
                 rendered_writer.release()
 
+        if cancelled or tracking_cancel_requested(job):
+            working_rendered_path.unlink(missing_ok=True)
+            clip_path.unlink(missing_ok=True)
+            yield tracking_cancelled_payload(self.name, targets)
+            return
+
         if rendered_writer is None or not working_rendered_path.exists():
             raise RuntimeError("SAM3 completed without producing a rendered tracking video.")
+        yield {
+            "done": False,
+            "progress": 99,
+            "stage": "finalizing",
+            "target_progress": tracking_target_progress(targets, 99, "finalizing"),
+            "overlays": [],
+            "backend": self.name,
+        }
+        if tracking_cancel_requested(job):
+            working_rendered_path.unlink(missing_ok=True)
+            clip_path.unlink(missing_ok=True)
+            yield tracking_cancelled_payload(self.name, targets)
+            return
         _transcode_rendered_video(working_rendered_path, rendered_path)
+        if tracking_cancel_requested(job):
+            rendered_path.unlink(missing_ok=True)
+            clip_path.unlink(missing_ok=True)
+            yield tracking_cancelled_payload(self.name, targets)
+            return
         try:
             _encode_clean_video_slice(
                 video_path,
@@ -352,9 +414,17 @@ class Sam3TrackingBackend:
         finally:
             clip_path.unlink(missing_ok=True)
 
+        if tracking_cancel_requested(job):
+            rendered_path.unlink(missing_ok=True)
+            clean_path.unlink(missing_ok=True)
+            yield tracking_cancelled_payload(self.name, targets)
+            return
+
         yield {
             "done": True,
             "progress": 100,
+            "stage": "complete",
+            "target_progress": tracking_target_progress(targets, 100, "complete"),
             "overlays": [],
             "backend": self.name,
             "rendered_video_path": str(rendered_path),
@@ -486,6 +556,7 @@ def tracking_error_payload(code: str, message: str, backend: str) -> dict[str, A
     return {
         "done": True,
         "progress": 0,
+        "stage": "error",
         "overlays": [],
         "backend": backend,
         "error": {
@@ -493,6 +564,126 @@ def tracking_error_payload(code: str, message: str, backend: str) -> dict[str, A
             "message": message,
         },
     }
+
+
+def tracking_cancel_requested(job: TrackingJob) -> bool:
+    return bool(job.cancel_event and job.cancel_event.is_set())
+
+
+def tracking_cancelled_payload(
+    backend: str, targets: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    return {
+        "done": True,
+        "cancelled": True,
+        "progress": 0,
+        "stage": "cancelled",
+        "target_progress": tracking_target_progress(targets or [], 0, "cancelled"),
+        "overlays": [],
+        "backend": backend,
+    }
+
+
+def normalized_tracking_targets(job: TrackingJob) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    for index, raw in enumerate(job.targets):
+        if not isinstance(raw, dict):
+            continue
+        prompt = str(raw.get("prompt") or "").strip()
+        label = str(raw.get("label") or "").strip()
+        if not prompt or not label:
+            continue
+        target_id = str(raw.get("id") or f"target-{index + 1}").strip() or f"target-{index + 1}"
+        if target_id in used_ids:
+            target_id = f"{target_id}-{index + 1}"
+        used_ids.add(target_id)
+        annotations = raw.get("annotations")
+        color = str(raw.get("color") or DEFAULT_OVERLAY_COLOR)
+        targets.append(
+            {
+                "id": target_id,
+                "label": label,
+                "prompt": prompt,
+                "annotations": annotations if isinstance(annotations, list) else [],
+                "color": color,
+            }
+        )
+    if targets:
+        return targets
+
+    prompt = (job.segmentation_prompt or job.question).strip() or "tracked object"
+    label = re.sub(r"^(track|follow|trace|monitor)\s+(the\s+)?", "", prompt, flags=re.IGNORECASE)
+    label = re.sub(r"[.?!]+$", "", label).strip() or "Tracked object"
+    if len(label) > 48:
+        label = f"{label[:45].rstrip()}..."
+    return [
+        {
+            "id": "target-1",
+            "label": label,
+            "prompt": prompt,
+            "annotations": job.annotations,
+            "color": next(
+                (
+                    str(annotation.get("color"))
+                    for annotation in job.annotations
+                    if isinstance(annotation, dict) and annotation.get("color")
+                ),
+                DEFAULT_OVERLAY_COLOR,
+            ),
+        }
+    ]
+
+
+def tracking_target_progress(
+    targets: list[dict[str, Any]], progress: int, stage: str
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "target_id": target["id"],
+            "label": target["label"],
+            "progress": progress,
+            "stage": stage,
+            "color": target["color"],
+        }
+        for target in targets
+    ]
+
+
+def _target_for_detection(
+    targets: list[dict[str, Any]] | None,
+    classes: list[Any],
+    index: int,
+) -> dict[str, Any] | None:
+    if not targets:
+        return None
+    if len(targets) == 1:
+        return targets[0]
+    class_value = _number(classes[index]) if index < len(classes) else None
+    class_index = int(class_value) if class_value is not None else -1
+    return targets[class_index] if 0 <= class_index < len(targets) else None
+
+
+def _target_track_id(target: dict[str, Any] | None, obj_id: Any) -> str:
+    return f"{target['id']}:sam3-{obj_id}" if target else f"sam3-{obj_id}"
+
+
+def _with_target_metadata(
+    overlay: dict[str, Any],
+    target: dict[str, Any] | None,
+    classes: list[Any],
+    index: int,
+) -> dict[str, Any]:
+    if target:
+        target_color = target.get("color", DEFAULT_OVERLAY_COLOR)
+        overlay["target_id"] = target["id"]
+        overlay["target_label"] = target["label"]
+        overlay["target_color"] = target_color
+        overlay["color"] = target_color
+    class_value = _number(classes[index]) if index < len(classes) else None
+    if class_value is not None:
+        overlay["class_id"] = int(class_value)
+    return overlay
 
 
 def annotation_boxes_xywh(annotations: list[dict[str, Any]]) -> list[list[float]]:
@@ -547,6 +738,7 @@ def ultralytics_result_to_overlays(
     result: Any,
     timestamp: float,
     max_polygon_points: int = 160,
+    targets: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     orig_shape = getattr(result, "orig_shape", None)
     if not isinstance(orig_shape, tuple) or len(orig_shape) < 2:
@@ -559,24 +751,25 @@ def ultralytics_result_to_overlays(
     boxes = getattr(result, "boxes", None)
     confs = _to_list(getattr(boxes, "conf", None))
     ids = _to_list(getattr(boxes, "id", None))
+    classes = _to_list(getattr(boxes, "cls", None))
     masks = getattr(result, "masks", None)
     mask_data = _to_numpy(getattr(masks, "data", None))
     if mask_data is not None and getattr(mask_data, "ndim", 0) == 3:
         for mask_index, mask in enumerate(mask_data):
             obj_id = ids[mask_index] if mask_index < len(ids) else mask_index + 1
             score = confs[mask_index] if mask_index < len(confs) else None
-            for contour_index, points in enumerate(
+            target = _target_for_detection(targets, classes, mask_index)
+            for points in (
                 _mask_contours_to_percent_points(mask, int(width), int(height), max_polygon_points)
             ):
-                overlays.append(
-                    {
-                        "track_id": f"sam3-{obj_id}",
-                        "label": _overlay_label(obj_id, score),
-                        "color": DEFAULT_OVERLAY_COLOR,
-                        "timestamp": timestamp,
-                        "points": points,
-                    }
-                )
+                overlay = {
+                    "track_id": _target_track_id(target, obj_id),
+                    "label": target["label"] if target else _overlay_label(obj_id, score),
+                    "color": DEFAULT_OVERLAY_COLOR,
+                    "timestamp": timestamp,
+                    "points": points,
+                }
+                overlays.append(_with_target_metadata(overlay, target, classes, mask_index))
         if overlays:
             return overlays
 
@@ -586,15 +779,15 @@ def ultralytics_result_to_overlays(
             continue
         obj_id = ids[index] if index < len(ids) else index + 1
         score = confs[index] if index < len(confs) else None
-        overlays.append(
-            {
-                "track_id": f"sam3-{obj_id}",
-                "label": _overlay_label(obj_id, score),
-                "color": DEFAULT_OVERLAY_COLOR,
-                "timestamp": timestamp,
-                "points": _xyxy_pixels_to_points(box, width, height),
-            }
-        )
+        target = _target_for_detection(targets, classes, index)
+        overlay = {
+            "track_id": _target_track_id(target, obj_id),
+            "label": target["label"] if target else _overlay_label(obj_id, score),
+            "color": DEFAULT_OVERLAY_COLOR,
+            "timestamp": timestamp,
+            "points": _xyxy_pixels_to_points(box, width, height),
+        }
+        overlays.append(_with_target_metadata(overlay, target, classes, index))
     return overlays
 
 
@@ -924,12 +1117,14 @@ def _overlay_label(obj_id: Any, score: Any) -> str:
     return f"SAM3 Track {obj_id} ({score_value:.2f})"
 
 
-def _simulated_overlay(t: float, offset: float) -> list[dict[str, Any]]:
+def _simulated_overlay(t: float, offset: float, target: dict[str, Any]) -> list[dict[str, Any]]:
     x = 20 + (offset * 1.7)
     return [
         {
-            "track_id": "simulated-lever-1",
-            "label": "Simulated Tracking Overlay",
+            "track_id": f"{target['id']}:simulated-1",
+            "target_id": target["id"],
+            "target_label": target["label"],
+            "label": target["label"],
             "color": DEFAULT_OVERLAY_COLOR,
             "timestamp": t,
             "points": [
@@ -946,7 +1141,8 @@ def _to_list(value: Any) -> list[Any]:
     if value is None:
         return []
     if hasattr(value, "tolist"):
-        return value.tolist()
+        converted = value.tolist()
+        return converted if isinstance(converted, list) else [converted]
     if isinstance(value, list):
         return value
     if isinstance(value, tuple):

@@ -46,8 +46,28 @@ def _tracking_error_payload(code: str, message: str) -> dict[str, Any]:
     }
 
 
+def _tracking_was_cancelled(tracking_job_id: str) -> bool:
+    if redis_client is None:
+        return False
+    try:
+        raw = redis_client.get(f"tracking:{tracking_job_id}")
+    except Exception:
+        return False
+    if not raw:
+        return False
+    try:
+        return bool(json.loads(raw).get("cancelled"))
+    except (TypeError, json.JSONDecodeError):
+        return False
+
+
 def run_tracking_job(job_payload: dict[str, Any]) -> dict[str, Any]:
     tracking_job_id = job_payload["tracking_job_id"]
+    if _tracking_was_cancelled(tracking_job_id):
+        return {
+            "status": "cancelled",
+            "tracking_job_id": tracking_job_id,
+        }
     try:
         with httpx.Client(timeout=120) as client:
             response = client.post(f"{SAM3_SERVICE_URL}/tracking/start", json=job_payload)

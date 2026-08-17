@@ -21,6 +21,10 @@ class FakeRedis:
     def setex(self, key: str, ttl: int, value: str) -> None:
         self.values[key] = (ttl, value)
 
+    def get(self, key: str) -> str | None:
+        item = self.values.get(key)
+        return item[1] if item else None
+
 
 def test_worker_tracking_delegates_to_sam3_service(monkeypatch) -> None:
     requests: list[dict[str, Any]] = []
@@ -82,3 +86,19 @@ def test_worker_tracking_records_proxy_error(monkeypatch) -> None:
     assert stored_payload["done"] is True
     assert stored_payload["overlays"] == []
     assert stored_payload["error"]["code"] == "sam3_worker_proxy_failed"
+
+
+def test_worker_does_not_start_a_job_cancelled_while_queued(monkeypatch) -> None:
+    fake_redis = FakeRedis()
+    fake_redis.setex("tracking:job-3", 3600, json.dumps({"cancelled": True, "done": True}))
+    monkeypatch.setattr(tasks, "redis_client", fake_redis)
+
+    class UnexpectedClient:
+        def __init__(self, timeout: int) -> None:
+            raise AssertionError("Cancelled queued job must not contact SAM3")
+
+    monkeypatch.setattr(tasks.httpx, "Client", UnexpectedClient)
+
+    result = tasks.run_tracking_job({"tracking_job_id": "job-3"})
+
+    assert result == {"status": "cancelled", "tracking_job_id": "job-3"}

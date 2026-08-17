@@ -68,3 +68,5 @@ def test_prompt_includes_tight_annotation_quality_rules() -> None:
     assert "Keep annotation geometry consistent across similar targets in the same image" in prompt
     assert "For thumbnails or other tiny parts, annotate only the nail itself when visible" in prompt
     assert "Return one annotation per requested target when the user names distinct targets" in prompt
+    assert "one `tracking_targets` item per distinct object class" in prompt
+    assert "Never merge targets such as a person and an AMS unit" in prompt

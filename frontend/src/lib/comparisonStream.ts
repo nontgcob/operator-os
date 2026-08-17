@@ -60,6 +60,7 @@ export function normalizeComparisonEvent(
       annotations: source.annotations,
       tracking_prompt: source.tracking_prompt,
       tracking_annotations: source.tracking_annotations,
+      tracking_targets: source.tracking_targets,
       error: typeof source.error === "string" ? source.error : undefined,
     } as Partial<ComparisonAnswer>;
     return { type, label: label as AnswerLabel, answer };

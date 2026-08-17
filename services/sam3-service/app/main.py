@@ -4,6 +4,7 @@ import json
 import os
 import re
 import asyncio
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,13 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.tracking_backend import TrackingBackend, TrackingJob, build_tracking_backend, tracking_error_payload
+from app.tracking_backend import (
+    TrackingBackend,
+    TrackingJob,
+    build_tracking_backend,
+    tracking_cancelled_payload,
+    tracking_error_payload,
+)
 
 try:
     from services.common.env import load_env_file
@@ -27,6 +34,7 @@ app = FastAPI(title="OperatorOS SAM3 Service", version="0.1.0")
 TRACKING_TTL_SECONDS = 3600
 USE_REDIS_STATE = os.getenv("USE_REDIS_STATE", "false").lower() == "true"
 _tracking_backend: TrackingBackend | None = None
+_tracking_cancel_events: dict[str, threading.Event] = {}
 
 
 class _MemoryState:
@@ -69,6 +77,7 @@ class TrackingStartRequest(BaseModel):
     question: str
     segmentation_prompt: str = ""
     annotations: list[dict[str, Any]] = Field(default_factory=list)
+    targets: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def get_tracking_backend() -> TrackingBackend:
@@ -78,7 +87,7 @@ def get_tracking_backend() -> TrackingBackend:
     return _tracking_backend
 
 
-def _tracking_job(payload: TrackingStartRequest) -> TrackingJob:
+def _tracking_job(payload: TrackingStartRequest, cancel_event: threading.Event) -> TrackingJob:
     return TrackingJob(
         tracking_job_id=payload.tracking_job_id,
         session_id=payload.session_id,
@@ -88,6 +97,8 @@ def _tracking_job(payload: TrackingStartRequest) -> TrackingJob:
         question=payload.question,
         segmentation_prompt=payload.segmentation_prompt,
         annotations=payload.annotations,
+        targets=payload.targets,
+        cancel_event=cancel_event,
     )
 
 
@@ -123,21 +134,35 @@ def _store_tracking_overlays(tracking_job_id: str, overlays: list[dict[str, Any]
     return output_path
 
 
-async def _run_tracking(payload: TrackingStartRequest) -> None:
+async def _run_tracking(payload: TrackingStartRequest, cancel_event: threading.Event) -> None:
     collected_overlays: list[dict[str, Any]] = []
     overlay_keys: set[str] = set()
     try:
         backend = get_tracking_backend()
-        async for update in backend.track(_tracking_job(payload)):
+        async for update in backend.track(_tracking_job(payload, cancel_event)):
+            if cancel_event.is_set() and not update.get("cancelled"):
+                update = tracking_cancelled_payload(
+                    getattr(backend, "name", "sam3"),
+                    [
+                        {
+                            "id": target.get("id") or f"target-{index + 1}",
+                            "label": target.get("label") or "Tracked object",
+                            "color": target.get("color") or "#67A552",
+                        }
+                        for index, target in enumerate(payload.targets)
+                    ],
+                )
             for overlay in update.get("overlays", []):
                 overlay_key = json.dumps(overlay, sort_keys=True, separators=(",", ":"))
                 if overlay_key not in overlay_keys:
                     overlay_keys.add(overlay_key)
                     collected_overlays.append(overlay)
-            if update.get("done") and not update.get("error"):
+            if update.get("done") and not update.get("error") and not update.get("cancelled"):
                 _store_tracking_overlays(payload.tracking_job_id, collected_overlays)
                 update = {**update, "overlay_count": len(collected_overlays)}
             _store_tracking_update(payload.tracking_job_id, update)
+            if update.get("cancelled"):
+                break
     except Exception as exc:
         _store_tracking_update(
             payload.tracking_job_id,
@@ -147,6 +172,8 @@ async def _run_tracking(payload: TrackingStartRequest) -> None:
                 backend="unknown",
             ),
         )
+    finally:
+        _tracking_cancel_events.pop(payload.tracking_job_id, None)
 
 
 @app.get("/health")
@@ -191,12 +218,61 @@ async def health() -> dict[str, Any]:
 
 @app.post("/tracking/start")
 async def tracking_start(payload: TrackingStartRequest, background_tasks: BackgroundTasks) -> dict[str, str]:
+    cancel_event = threading.Event()
+    _tracking_cancel_events[payload.tracking_job_id] = cancel_event
+    target_progress = [
+        {
+            "target_id": target.get("id") or f"target-{index + 1}",
+            "label": target.get("label") or "Tracked object",
+            "progress": 0,
+            "stage": "queued",
+            "color": target.get("color") or "#67A552",
+        }
+        for index, target in enumerate(payload.targets)
+    ]
     _store_tracking_update(
         payload.tracking_job_id,
-        {"done": False, "progress": 0, "overlays": [], "backend": "pending"},
+        {
+            "done": False,
+            "progress": 0,
+            "stage": "queued",
+            "target_progress": target_progress,
+            "overlays": [],
+            "backend": "pending",
+        },
     )
-    background_tasks.add_task(_run_tracking, payload)
+    background_tasks.add_task(_run_tracking, payload, cancel_event)
     return {"status": "started", "tracking_job_id": payload.tracking_job_id}
+
+
+@app.post("/tracking/cancel/{tracking_job_id}")
+async def cancel_tracking(tracking_job_id: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Za-z0-9-]+", tracking_job_id):
+        raise HTTPException(status_code=400, detail="Invalid tracking job ID")
+
+    current_raw = state_client.get(f"tracking:{tracking_job_id}")
+    if not current_raw:
+        raise HTTPException(status_code=404, detail="Tracking job was not found or expired")
+    current = json.loads(current_raw)
+    if current.get("done"):
+        return current
+
+    cancel_event = _tracking_cancel_events.get(tracking_job_id)
+    if cancel_event:
+        cancel_event.set()
+    cancelled = tracking_cancelled_payload(
+        current.get("backend") or "sam3",
+        [
+            {
+                "id": target.get("target_id"),
+                "label": target.get("label"),
+                "color": target.get("color"),
+            }
+            for target in current.get("target_progress", [])
+        ],
+    )
+    _store_tracking_update(tracking_job_id, cancelled)
+    return {"tracking_job_id": tracking_job_id, **cancelled}
 
 
 @app.get("/tracking/status/{tracking_job_id}")

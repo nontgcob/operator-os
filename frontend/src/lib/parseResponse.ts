@@ -1,10 +1,35 @@
-import type { Annotation } from "@/lib/types";
+import type { Annotation, TrackingTarget } from "@/lib/types";
 
 interface ParsedModelResponse {
   answer: string;
   annotations: Annotation[];
   trackingPrompt: string;
   trackingAnnotations: Annotation[];
+  trackingTargets: TrackingTarget[];
+}
+
+function parseTrackingTargets(value: unknown): TrackingTarget[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry, index) => {
+    if (!entry || typeof entry !== "object") return [];
+    const target = entry as {
+      id?: unknown;
+      label?: unknown;
+      prompt?: unknown;
+      annotations?: unknown;
+      color?: unknown;
+    };
+    const label = typeof target.label === "string" ? target.label.replace(/\s+/g, " ").trim() : "";
+    const prompt = typeof target.prompt === "string" ? target.prompt.replace(/\s+/g, " ").trim() : "";
+    if (!label || !prompt) return [];
+    return [{
+      id: typeof target.id === "string" && target.id.trim() ? target.id.trim() : `target-${index + 1}`,
+      label,
+      prompt,
+      annotations: parseAnnotationArray(target.annotations),
+      ...(typeof target.color === "string" ? { color: target.color } : {}),
+    }];
+  });
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -100,12 +125,14 @@ function responseFromJson(value: unknown, fallback: string): ParsedModelResponse
     annotations?: unknown;
     tracking_prompt?: unknown;
     tracking_annotations?: unknown;
+    tracking_targets?: unknown;
   };
   if (
     data.answer === undefined &&
     data.annotations === undefined &&
     data.tracking_prompt === undefined &&
-    data.tracking_annotations === undefined
+    data.tracking_annotations === undefined &&
+    data.tracking_targets === undefined
   ) {
     return null;
   }
@@ -114,11 +141,12 @@ function responseFromJson(value: unknown, fallback: string): ParsedModelResponse
     annotations: parseAnnotationArray(data.annotations),
     trackingPrompt: typeof data.tracking_prompt === "string" ? data.tracking_prompt : "",
     trackingAnnotations: parseAnnotationArray(data.tracking_annotations),
+    trackingTargets: parseTrackingTargets(data.tracking_targets),
   };
 }
 
 export function parseModelResponse(raw: string): ParsedModelResponse {
-  if (!raw) return { answer: "", annotations: [], trackingPrompt: "", trackingAnnotations: [] };
+  if (!raw) return { answer: "", annotations: [], trackingPrompt: "", trackingAnnotations: [], trackingTargets: [] };
 
   const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
   if (fenceMatch) {
@@ -176,5 +204,5 @@ export function parseModelResponse(raw: string): ParsedModelResponse {
     // Non-JSON fallback.
   }
 
-  return { answer: raw, annotations: [], trackingPrompt: "", trackingAnnotations: [] };
+  return { answer: raw, annotations: [], trackingPrompt: "", trackingAnnotations: [], trackingTargets: [] };
 }

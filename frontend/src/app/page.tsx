@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { AnnotationControls } from "@/components/AnnotationControls";
 import { AnnotationOverlay } from "@/components/AnnotationOverlay";
@@ -15,10 +15,11 @@ import {
 import { readComparisonSSE } from "@/lib/comparisonStream";
 import { parseModelResponse } from "@/lib/parseResponse";
 import { explicitlyRequestsTracking } from "@/lib/trackingIntent";
-import { createTrackingLayers } from "@/lib/trackingLayers";
+import { colorizeTrackingTargets, createTrackingLayers } from "@/lib/trackingLayers";
 import {
   askComparison,
   askQuestion,
+  cancelTracking,
   clearChatSession,
   revealComparison,
   getMediaSourceUrl,
@@ -39,6 +40,8 @@ import type {
   ComparisonTurn,
   TrackingLayer,
   TrackingOverlay,
+  TrackingTarget,
+  TrackingTargetProgress,
   TranscriptWindowResponse,
 } from "@/lib/types";
 
@@ -59,6 +62,15 @@ interface UploadedDocument {
   id: string;
   filename: string;
   chunkCount: number;
+}
+
+interface ActiveTrackingJob {
+  id: string;
+  progress: TrackingTargetProgress[];
+  status: string;
+  error: string;
+  liveOverlays: TrackingOverlay[];
+  cancelling: boolean;
 }
 
 const RAGVLM_MODELS = [
@@ -95,6 +107,20 @@ const RAGVLM_MODELS = [
 ];
 
 const DEFAULT_RAGVLM_MODEL = "google/gemini-3.1-pro-preview";
+type Theme = "light" | "dark";
+
+function ThemeIcon({ theme }: { theme: Theme }) {
+  return theme === "dark" ? (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41" />
+    </svg>
+  ) : (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <path d="M20.2 15.1A8.5 8.5 0 0 1 8.9 3.8 8.5 8.5 0 1 0 20.2 15.1Z" />
+    </svg>
+  );
+}
 
 function formatTimestamp(seconds: number): string {
   const totalSeconds = Math.max(0, Math.floor(seconds));
@@ -102,6 +128,26 @@ function formatTimestamp(seconds: number): string {
   const remainingSeconds = totalSeconds % 60;
   return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
 }
+
+function shortTrackingLabel(prompt: string): string {
+  const label = prompt
+    .replace(/^(track|follow|trace|monitor)\s+(the\s+)?/i, "")
+    .replace(/[.?!]+$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!label) return "Tracked object";
+  return label.length > 48 ? `${label.slice(0, 45).trimEnd()}...` : label;
+}
+
+const TRACKING_STAGE_LABELS: Record<TrackingTargetProgress["stage"], string> = {
+  queued: "Queued",
+  preparing: "Preparing video",
+  tracking: "Tracking frames",
+  finalizing: "Finalizing overlays",
+  complete: "Complete",
+  cancelled: "Cancelled",
+  error: "Failed",
+};
 
 function annotationPoints(annotation: Annotation): Array<{ x: number; y: number }> {
   return (annotation.points ?? []).flatMap((point) => {
@@ -120,58 +166,6 @@ function pathPoints(d: string): Array<{ x: number; y: number }> {
     points.push({ x: numbers[index], y: numbers[index + 1] });
   }
   return points;
-}
-
-// Shift annotations down by 1/8 of the video height (1000 * 1/8 = 125)
-function clampRagvlmLocal(value: number) {
-  return Math.min(1000, Math.max(0, value));
-}
-
-function translatePathD(d: string | undefined, dx: number, dy: number) {
-  if (!d) return d;
-  let isX = true;
-  return d.replace(/([-+]?\d*\.?\d+)/g, (match) => {
-    const num = parseFloat(match);
-    const next = isX ? num + dx : num + dy;
-    isX = !isX;
-    return String(next);
-  });
-}
-
-function shiftAnnotationDown(annotation: Annotation, dy = 125): Annotation {
-  switch (annotation.type) {
-    case "rect":
-    case "text":
-    case "number":
-      return { ...annotation, y: annotation.y !== undefined ? clampRagvlmLocal(annotation.y + dy) : annotation.y };
-    case "circle":
-      return {
-        ...annotation,
-        cy: annotation.cy !== undefined ? clampRagvlmLocal(annotation.cy + dy) : annotation.cy,
-        y: annotation.y !== undefined ? clampRagvlmLocal(annotation.y + dy) : annotation.y,
-      };
-    case "arrow":
-      return {
-        ...annotation,
-        y1: annotation.y1 !== undefined ? clampRagvlmLocal(annotation.y1 + dy) : annotation.y1,
-        y2: annotation.y2 !== undefined ? clampRagvlmLocal(annotation.y2 + dy) : annotation.y2,
-      };
-    case "path":
-      return {
-        ...annotation,
-        d: translatePathD(annotation.d, 0, dy),
-        points: (annotation.points ?? []).map((p) =>
-          Array.isArray(p) ? [p[0], clampRagvlmLocal((p[1] as number) + dy)] : { x: p.x, y: clampRagvlmLocal(p.y + dy) }
-        ),
-      };
-    case "polygon":
-      return {
-        ...annotation,
-        points: (annotation.points ?? []).map((p) => (Array.isArray(p) ? [p[0], clampRagvlmLocal((p[1] as number) + dy)] : [p.x, clampRagvlmLocal(p.y + dy)])),
-      } as Annotation;
-    default:
-      return annotation;
-  }
 }
 
 function drawCanvasArrow(
@@ -260,6 +254,7 @@ function readSSE(
 }
 
 export default function Home() {
+  const [theme, setTheme] = useState<Theme>("light");
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [videoUrl, setVideoUrl] = useState<string>("");
   const [originalVideoUrl, setOriginalVideoUrl] = useState<string>("");
@@ -289,11 +284,10 @@ export default function Home() {
   const [transcriptError, setTranscriptError] = useState("");
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [modelAnnotations, setModelAnnotations] = useState<Annotation[]>([]);
-  const [trackingOverlays, setTrackingOverlays] = useState<TrackingOverlay[]>([]);
   const [trackingLayers, setTrackingLayers] = useState<TrackingLayer[]>([]);
   const [trackingEnabled, setTrackingEnabled] = useState(false);
   const [showTrackingOverlays, setShowTrackingOverlays] = useState(false);
-  const [activeTrackingJobId, setActiveTrackingJobId] = useState("");
+  const [activeTrackingJobs, setActiveTrackingJobs] = useState<ActiveTrackingJob[]>([]);
   const [trackingStatus, setTrackingStatus] = useState("");
   const [trackingError, setTrackingError] = useState("");
   const [chatClearStatus, setChatClearStatus] = useState("");
@@ -306,19 +300,36 @@ export default function Home() {
   const [textAnnotation, setTextAnnotation] = useState("");
   const [showTranscript, setShowTranscript] = useState(false);
   const localFileInputRef = useRef<HTMLInputElement | null>(null);
-  const trackingEventSourceRef = useRef<EventSource | null>(null);
-  const resumeAfterTrackingRef = useRef(false);
+  const trackingEventSourcesRef = useRef<Map<string, EventSource>>(new Map());
 
-  function closeTrackingEventSource() {
-    const source = trackingEventSourceRef.current as EventSource | null;
-    if (source) {
-      source.close();
-    }
-    trackingEventSourceRef.current = null;
+  useEffect(() => {
+    const savedTheme = window.localStorage.getItem("operatoros-theme");
+    const resolvedTheme: Theme =
+      savedTheme === "dark" || savedTheme === "light"
+        ? savedTheme
+        : window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light";
+    setTheme(resolvedTheme);
+    document.documentElement.dataset.theme = resolvedTheme;
+  }, []);
+
+  function toggleTheme() {
+    setTheme((current) => {
+      const next = current === "light" ? "dark" : "light";
+      document.documentElement.dataset.theme = next;
+      window.localStorage.setItem("operatoros-theme", next);
+      return next;
+    });
+  }
+
+  function closeTrackingEventSources() {
+    trackingEventSourcesRef.current.forEach((source) => source.close());
+    trackingEventSourcesRef.current.clear();
   }
 
   function resetVideoContext() {
-    closeTrackingEventSource();
+    closeTrackingEventSources();
     if (videoUrl && videoUrl.startsWith("blob:")) {
       URL.revokeObjectURL(videoUrl);
     }
@@ -339,9 +350,8 @@ export default function Home() {
     setAnnotations([]);
     setModelAnnotations([]);
     setAnnotationUndoStack([]);
-    setTrackingOverlays([]);
     setTrackingLayers([]);
-    setActiveTrackingJobId("");
+    setActiveTrackingJobs([]);
     setTrackingStatus("");
     setTrackingError("");
     setChatMessages([]);
@@ -399,29 +409,52 @@ export default function Home() {
 
   function removeTracking() {
     if (!trackingLayers.length) return;
-    closeTrackingEventSource();
-    setTrackingOverlays([]);
     setTrackingLayers([]);
-    setActiveTrackingJobId("");
-    setTrackingStatus("All tracking layers removed.");
+    setTrackingStatus("All tracking items removed.");
     setTrackingError("");
-    resumeAfterTrackingRef.current = false;
+  }
+
+  async function requestTrackingCancellation(job: ActiveTrackingJob) {
+    const targetNames = job.progress.map((target) => target.label).join(", ");
+    const confirmed = window.confirm(
+      `Cancel tracking for ${targetNames || "this item"}? Completed progress from this job will be discarded.`
+    );
+    if (!confirmed) return;
+
+    setActiveTrackingJobs((current) =>
+      current.map((candidate) =>
+        candidate.id === job.id
+          ? { ...candidate, cancelling: true, status: "Cancelling tracking..." }
+          : candidate
+      )
+    );
+    try {
+      await cancelTracking(job.id);
+    } catch (error) {
+      setActiveTrackingJobs((current) =>
+        current.map((candidate) =>
+          candidate.id === job.id
+            ? {
+                ...candidate,
+                cancelling: false,
+                error: `Unable to cancel: ${errorMessage(error)}`,
+              }
+            : candidate
+        )
+      );
+    }
   }
 
   function restoreFullVideo() {
-    closeTrackingEventSource();
-    setTrackingOverlays([]);
     setAnnotations([]);
     setModelAnnotations([]);
     setAnnotationUndoStack([]);
-    setActiveTrackingJobId("");
     setTrackingLayers([]);
     setTrackingStatus("");
     setTrackingError("");
     setShowTrackingOverlays(false);
     setVideoTimeOffset(0);
     setTimestamp(0);
-    resumeAfterTrackingRef.current = false;
     if (originalVideoUrl && videoUrl !== originalVideoUrl) {
       setVideoUrl(originalVideoUrl);
       setPendingVideoReadyStatus("Full original video restored.");
@@ -792,11 +825,6 @@ export default function Home() {
     ]);
     setQuestion("");
     setChatClearStatus("");
-    closeTrackingEventSource();
-    setTrackingOverlays([]);
-    setActiveTrackingJobId("");
-    setTrackingStatus("");
-    setTrackingError("");
 
     try {
       const frameData = await captureFrame();
@@ -840,63 +868,10 @@ export default function Home() {
         )
       );
       if (parsed.annotations.length) {
-        // Shift machine/model-generated annotations down by 1/32 of the video
-        // height (in ragvlm_0_1000 coords that's 1000 * 1/32 ≈ 31.25 → 31).
-        const SHIFT_Y = Math.round(1000 / 32);
-        const clampRagvlm = (v: number) => Math.min(1000, Math.max(0, Math.round(v)));
-
-        function translateD(d: string | undefined, dy: number) {
-          if (!d) return d;
-          let isX = true;
-          return d.replace(/([-+]?\d*\.?\d+)/g, (match) => {
-            const n = parseFloat(match);
-            if (Number.isNaN(n)) return match;
-            if (isX) {
-              isX = false;
-              return String(n);
-            }
-            isX = true;
-            return String(clampRagvlm(n + dy));
-          });
-        }
-
-        function shiftAnnotation(a: Annotation): Annotation {
-          switch (a.type) {
-            case "rect":
-            case "text":
-            case "number":
-              return { ...a, y: a.y !== undefined ? clampRagvlm(a.y + SHIFT_Y) : a.y };
-            case "circle":
-              return { ...a, cy: a.cy !== undefined ? clampRagvlm(a.cy + SHIFT_Y) : (a.y !== undefined ? clampRagvlm(a.y + SHIFT_Y) : a.cy) };
-            case "arrow":
-              return {
-                ...a,
-                y1: a.y1 !== undefined ? clampRagvlm(a.y1 + SHIFT_Y) : a.y1,
-                y2: a.y2 !== undefined ? clampRagvlm(a.y2 + SHIFT_Y) : a.y2,
-              };
-            case "path":
-              return {
-                ...a,
-                d: translateD(a.d, SHIFT_Y),
-                points: Array.isArray(a.points)
-                  ? a.points.map((p) => (Array.isArray(p) ? [p[0], clampRagvlm(p[1] + SHIFT_Y)] : { x: p.x, y: clampRagvlm(p.y + SHIFT_Y) }))
-                  : a.points,
-              };
-            case "polygon":
-              return {
-                ...a,
-                points: Array.isArray(a.points)
-                  ? a.points.map((p) => (Array.isArray(p) ? [p[0], clampRagvlm(p[1] + SHIFT_Y)] : p))
-                  : a.points,
-              };
-            default:
-              return a;
-          }
-        }
-
+        // Render the model's normalized coordinates without a frontend offset.
         setModelAnnotations(
           parsed.annotations.map((a) => ({
-            ...shiftAnnotation(a),
+            ...a,
             fontSize: a.fontSize ?? 1,
             strokeWidth: a.strokeWidth ?? 3,
           }))
@@ -906,16 +881,14 @@ export default function Home() {
       }
       const explicitTrackingRequest = explicitlyRequestsTracking(trimmedQuestion);
       const modelSuggestsTracking =
-        Boolean(parsed.trackingPrompt.trim()) || parsed.trackingAnnotations.length > 0;
+        parsed.trackingTargets.length > 0 ||
+        Boolean(parsed.trackingPrompt.trim()) ||
+        parsed.trackingAnnotations.length > 0;
       const shouldStartTracking = explicitTrackingRequest || trackingEnabled || modelSuggestsTracking;
 
       if (shouldStartTracking) {
         const video = videoRef.current;
-        resumeAfterTrackingRef.current = Boolean(video && !video.paused);
         video?.pause();
-        closeTrackingEventSource();
-        setTrackingOverlays([]);
-        setActiveTrackingJobId("");
         setTrackingError("");
         setTrackingStatus(
           explicitTrackingRequest
@@ -929,11 +902,56 @@ export default function Home() {
             ? parsed.annotations
             : [];
 
+        const layerPrompt = parsed.trackingPrompt.trim() || trimmedQuestion;
+        const baseTrackingTargets: TrackingTarget[] = parsed.trackingTargets.length
+          ? parsed.trackingTargets
+          : [
+              {
+                id: "target-1",
+                label: shortTrackingLabel(layerPrompt),
+                prompt: layerPrompt,
+                annotations: trackingAnnotations,
+              },
+            ];
+        const trackingTargets = colorizeTrackingTargets({
+          targets: baseTrackingTargets,
+          annotations: parsed.annotations,
+          colorOffset:
+            trackingLayers.length +
+            activeTrackingJobs.reduce((count, job) => count + job.progress.length, 0),
+        });
+        const targetAnnotations = trackingTargets.flatMap((target) => target.annotations);
+        const linkedMachineAnnotations = targetAnnotations.length
+          ? targetAnnotations
+          : parsed.annotations.map((annotation, index) => {
+              const target = trackingTargets[Math.min(index, trackingTargets.length - 1)];
+              return target
+                ? {
+                    ...annotation,
+                    color: target.color ?? annotation.color,
+                    tracking_target_id: target.id,
+                  }
+                : annotation;
+            });
+        setModelAnnotations(
+          linkedMachineAnnotations.map((annotation) => ({
+            ...annotation,
+            fontSize: annotation.fontSize ?? 1,
+            strokeWidth: annotation.strokeWidth ?? 3,
+          }))
+        );
+        const initialProgress: TrackingTargetProgress[] = trackingTargets.map((target) => ({
+          target_id: target.id,
+          label: target.label,
+          progress: 0,
+          stage: "queued",
+          color: target.color ?? "#6366f1",
+        }));
+
         if (explicitTrackingRequest) {
           setShowTrackingOverlays(true);
         }
 
-        const layerPrompt = parsed.trackingPrompt.trim() || trimmedQuestion;
         try {
           const tracking = await startTracking({
             session_id: sessionId,
@@ -943,20 +961,34 @@ export default function Home() {
             question: trimmedQuestion,
             segmentation_prompt: layerPrompt,
             annotations: trackingAnnotations,
+            targets: trackingTargets,
           });
           const trackingJobId = tracking.tracking_job_id;
-          setActiveTrackingJobId(trackingJobId);
-          setTrackingStatus(`Tracking job started: ${trackingJobId}`);
+          setActiveTrackingJobs((current) => [
+            ...current,
+            {
+              id: trackingJobId,
+              progress: initialProgress,
+              status: "SAM3: Queued (0%)",
+              error: "",
+              liveOverlays: [],
+              cancelling: false,
+            },
+          ]);
+          setTrackingStatus("");
           const events = new EventSource(
             `${process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ?? "http://localhost:8000"}/tracking/events/${trackingJobId}`
           );
-          trackingEventSourceRef.current = events;
+          trackingEventSourcesRef.current.set(trackingJobId, events);
           let completionHandled = false;
           events.onmessage = async (e) => {
             const payload = JSON.parse(e.data) as {
               tracking_job_id?: string;
               done: boolean;
+              cancelled?: boolean;
               progress?: number;
+              stage?: TrackingTargetProgress["stage"];
+              target_progress?: TrackingTargetProgress[];
               backend?: string;
               overlays: TrackingOverlay[];
               rendered_video_path?: string;
@@ -965,23 +997,56 @@ export default function Home() {
             };
             if (payload.tracking_job_id && payload.tracking_job_id !== trackingJobId) return;
             if (payload.error?.message) {
-              setTrackingError(payload.error.message);
-              resumeAfterTrackingRef.current = false;
+              setActiveTrackingJobs((current) =>
+                current.map((job) =>
+                  job.id === trackingJobId
+                    ? {
+                        ...job,
+                        error: payload.error?.message ?? "Tracking failed.",
+                        progress: job.progress.map((target) => ({ ...target, stage: "error" })),
+                      }
+                    : job
+                )
+              );
             }
-            setTrackingStatus(
-              `${payload.backend ?? "SAM3"} tracking ${payload.done ? "complete" : "running"}${
-                payload.progress !== undefined ? ` (${payload.progress}%)` : ""
-              }`
+            const stageLabel = payload.stage
+              ? TRACKING_STAGE_LABELS[payload.stage]
+              : payload.done
+                ? "Complete"
+                : "Tracking frames";
+            const backendLabel =
+              payload.backend === "sam3" || payload.backend === "pending"
+                ? "SAM3"
+                : payload.backend ?? "SAM3";
+            const nextStatus = `${backendLabel}: ${stageLabel}${
+              payload.progress !== undefined ? ` (${payload.progress}%)` : ""
+            }`;
+            setActiveTrackingJobs((current) =>
+              current.map((job) =>
+                job.id === trackingJobId
+                  ? {
+                      ...job,
+                      status: nextStatus,
+                      progress: Array.isArray(payload.target_progress)
+                        ? payload.target_progress
+                        : job.progress,
+                      liveOverlays: payload.overlays,
+                    }
+                  : job
+              )
             );
-            setTrackingOverlays(payload.overlays);
             if (payload.done) {
               if (completionHandled) return;
               completionHandled = true;
-              if (!payload.error) {
+              if (payload.cancelled) {
+                setTrackingStatus("Tracking cancelled.");
+              } else if (!payload.error) {
                 try {
                   const manifest = await getTrackingOverlays(trackingJobId);
-                  const objectCount = new Set(manifest.overlays.map((overlay) => overlay.track_id)).size;
-                  if (!objectCount) {
+                  const layerCount = new Set(
+                    manifest.overlays.map((overlay) => overlay.target_id || overlay.track_id)
+                  ).size;
+                  if (!layerCount) {
                     setTrackingError("SAM3 completed but did not return any trackable masks.");
                   } else {
                     setTrackingLayers((currentLayers) => {
@@ -998,35 +1063,33 @@ export default function Home() {
                       ];
                     });
                     setTrackingStatus(
-                      `Added ${objectCount} tracking layer${objectCount === 1 ? "" : "s"}.`
+                      `Added ${layerCount} tracking item${layerCount === 1 ? "" : "s"}.`
                     );
                     setShowTrackingOverlays(true);
                   }
-                  setTrackingOverlays([]);
                 } catch (error) {
                   const message = error instanceof Error ? error.message : "Unable to load tracking masks.";
-                  setTrackingError(`Tracking finished, but its layers could not be loaded: ${message}`);
+                  setTrackingError(`Tracking finished, but its items could not be loaded: ${message}`);
                 }
+              } else {
+                setTrackingError(payload.error.message ?? "Tracking failed.");
               }
-              setActiveTrackingJobId("");
-              resumeAfterTrackingRef.current = false;
+              setActiveTrackingJobs((current) => current.filter((job) => job.id !== trackingJobId));
               events.close();
-              if (trackingEventSourceRef.current === events) {
-                trackingEventSourceRef.current = null;
-              }
+              trackingEventSourcesRef.current.delete(trackingJobId);
             }
           };
           events.onerror = () => {
             if (completionHandled) return;
-            setTrackingError("Tracking event stream failed.");
-            resumeAfterTrackingRef.current = false;
-            events.close();
-            if (trackingEventSourceRef.current === events) {
-              trackingEventSourceRef.current = null;
-            }
+            setActiveTrackingJobs((current) =>
+              current.map((job) =>
+                job.id === trackingJobId
+                  ? { ...job, status: "Reconnecting to tracking progress..." }
+                  : job
+              )
+            );
           };
         } catch (error) {
-          resumeAfterTrackingRef.current = false;
           const message = error instanceof Error ? error.message : "Unknown tracking start error.";
           setTrackingError(`Tracking failed to start: ${message}`);
           setTrackingStatus("");
@@ -1145,7 +1208,7 @@ export default function Home() {
       if (selectedAnswer.annotations.length) {
         setModelAnnotations(
           selectedAnswer.annotations.map((annotation) => ({
-            ...shiftAnnotationDown(annotation, Math.round(1000 / 32)),
+            ...annotation,
             fontSize: annotation.fontSize ?? 1,
             strokeWidth: annotation.strokeWidth ?? 3,
           }))
@@ -1188,12 +1251,22 @@ export default function Home() {
       message.comparison?.status === "complete" &&
       !message.comparison.revealed
   );
+  const liveTrackingOverlays = activeTrackingJobs.flatMap((job) => job.liveOverlays);
 
   return (
     <div className="op-shell">
       <header className="op-header">
         <h1 className="op-logo">OperatorOS</h1>
         <div className="op-header-actions">
+          <button
+            type="button"
+            className="op-theme-toggle"
+            onClick={toggleTheme}
+            aria-label={`Switch to ${theme === "light" ? "dark" : "light"} theme`}
+            title={`Switch to ${theme === "light" ? "dark" : "light"} theme`}
+          >
+            <ThemeIcon theme={theme} />
+          </button>
           <a className="op-header-link" href="http://localhost:8000/docs" target="_blank" rel="noreferrer">
             Docs
           </a>
@@ -1362,7 +1435,7 @@ export default function Home() {
               <TrackingOverlayCanvas
                 enabled={showTrackingOverlays}
                 layers={trackingLayers}
-                liveOverlays={trackingOverlays}
+                liveOverlays={liveTrackingOverlays}
                 videoRef={videoRef}
                 videoTimeOffset={videoTimeOffset}
               />
@@ -1398,7 +1471,7 @@ export default function Home() {
                   onClick={removeTracking}
                   disabled={!trackingLayers.length}
                 >
-                  Clear Layers
+                  Clear Items
                 </button>
                 <button
                   type="button"
@@ -1431,7 +1504,7 @@ export default function Home() {
                 checked={showTrackingOverlays}
                 onChange={(event) => setShowTrackingOverlays(event.target.checked)}
               />
-              <span>Show tracking layers</span>
+              <span>Show tracking items</span>
             </label>
             <label className="op-checkbox-row">
               <input
@@ -1443,7 +1516,7 @@ export default function Home() {
             </label>
             <div className="op-tracking-layer-panel">
               <div className="op-tracking-layer-heading">
-                <strong>Tracking Layers</strong>
+                <strong>Tracking Items</strong>
                 <div className="op-inline-actions">
                   <button
                     type="button"
@@ -1464,7 +1537,7 @@ export default function Home() {
                 </div>
               </div>
               {!trackingLayers.length ? (
-                <p className="op-help-text">Completed SAM3 objects will appear here as removable layers.</p>
+                <p className="op-help-text">Completed SAM3 objects will appear here as removable items.</p>
               ) : (
                 Array.from(new Set(trackingLayers.map((layer) => layer.round)))
                   .sort((a, b) => b - a)
@@ -1494,34 +1567,45 @@ export default function Home() {
                               className="op-tracking-layer-color"
                               value={layer.color}
                               aria-label={`Color for ${layer.label}`}
-                              onChange={(event) =>
+                              onChange={(event) => {
+                                const nextColor = event.target.value;
                                 setTrackingLayers((layers) =>
                                   layers.map((candidate) =>
                                     candidate.id === layer.id
                                       ? {
                                           ...candidate,
-                                          color: event.target.value,
+                                          color: nextColor,
                                           overlays: candidate.overlays.map((overlay) => ({
                                             ...overlay,
-                                            color: event.target.value,
+                                            color: nextColor,
+                                            target_color: nextColor,
                                           })),
                                         }
                                       : candidate
                                   )
-                                )
-                              }
+                                );
+                                if (layer.targetId) {
+                                  setModelAnnotations((current) =>
+                                    current.map((annotation) =>
+                                      annotation.tracking_target_id === layer.targetId
+                                        ? { ...annotation, color: nextColor }
+                                        : annotation
+                                    )
+                                  );
+                                }
+                              }}
                             />
                             <span className="op-tracking-layer-name" title={layer.label}>{layer.label}</span>
                             <button
                               type="button"
                               className="op-tracking-layer-remove"
                               aria-label={`Remove ${layer.label}`}
-                              title="Remove this tracking layer"
+                              title="Remove this tracking item"
                               onClick={() =>
                                 setTrackingLayers((layers) => layers.filter((candidate) => candidate.id !== layer.id))
                               }
                             >
-                              Remove
+                              <span aria-hidden="true">×</span>
                             </button>
                           </div>
                         ))}
@@ -1533,9 +1617,59 @@ export default function Home() {
               Frame at {formatTimestamp(timestamp)}. Default payload sends the original frame plus
               annotation JSON; the annotated snapshot is optional.
             </p>
-            {activeTrackingJobId && (
-              <p className="op-help-text">Active tracking job: {activeTrackingJobId}</p>
-            )}
+            {activeTrackingJobs.map((job) => (
+              <div
+                className="op-tracking-progress-list"
+                aria-label={`Tracking progress for ${job.progress.map((target) => target.label).join(", ")}`}
+                key={job.id}
+              >
+                <div className="op-tracking-job-heading">
+                  <span>{job.status}</span>
+                  <button
+                    type="button"
+                    className="op-tracking-cancel"
+                    disabled={job.cancelling}
+                    onClick={() => void requestTrackingCancellation(job)}
+                  >
+                    {job.cancelling ? "Cancelling..." : "Cancel"}
+                  </button>
+                </div>
+                {job.progress.map((target) => {
+                  const progress = Math.max(0, Math.min(100, Math.round(target.progress)));
+                  return (
+                    <div className="op-tracking-progress-item" key={`${job.id}:${target.target_id}`}>
+                      <div className="op-tracking-progress-heading">
+                        <span title={target.label}>{target.label}</span>
+                        <small>{TRACKING_STAGE_LABELS[target.stage]}</small>
+                      </div>
+                      <div className="op-tracking-progress-line">
+                        <div
+                          className="op-tracking-progress-track"
+                          role="progressbar"
+                          aria-label={`${target.label} tracking progress`}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={progress}
+                        >
+                          <span
+                            style={{
+                              width: `${progress}%`,
+                              backgroundColor: target.color,
+                            }}
+                          />
+                        </div>
+                        <strong>{progress}%</strong>
+                      </div>
+                    </div>
+                  );
+                })}
+                {job.error && (
+                  <p role="alert" className="op-error-text op-tracking-job-error">
+                    {job.error}
+                  </p>
+                )}
+              </div>
+            ))}
             {trackingStatus && (
               <p role="status" className="op-status-text">
                 {trackingStatus}

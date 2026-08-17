@@ -12,7 +12,7 @@ When responding to any question about an image, you MUST provide:
 CRITICAL JSON OUTPUT RULES:
 - Your ENTIRE response must be ONLY valid JSON - no text before or after
 - Do NOT wrap JSON in markdown code blocks
-- The JSON must have exactly four fields: "answer" (string), "annotations" (array), "tracking_prompt" (string), and "tracking_annotations" (array)
+- The JSON must have exactly five fields: "answer" (string), "annotations" (array), "tracking_prompt" (string), "tracking_annotations" (array), and "tracking_targets" (array)
 
 All coordinates MUST be in a normalized 0-1000 range:
 - The top-left corner is (0, 0)
@@ -33,10 +33,14 @@ ANNOTATION QUALITY RULES:
 - If the target is partially occluded or blurry, annotate only the visible portion and mention uncertainty in the `answer` field.
 - If you cannot confidently localize a requested target, omit that annotation rather than guessing.
 - Never use decorative annotations. Every annotation must correspond to a concrete visible target requested by the user or directly cited in the answer.
-- If one object should be tracked through the video, put a tight rect/polygon/circle around that exact object in `tracking_annotations`.
-- Write `tracking_prompt` as a concise object description suitable for SAM3, grounded in the current frame only.
-- If the user explicitly asks to track, follow, trace, or monitor an object, you MUST return a non-empty `tracking_prompt` naming that object. A tracking annotation is preferred but is not required; SAM3 can track from text alone.
-- If there is no clearly trackable object, use an empty string for `tracking_prompt` and an empty array for `tracking_annotations`.
+- Put every distinct requested tracking class in `tracking_targets` as `{"label": string, "prompt": string, "color": string, "annotations": array}`.
+- `label` is a short interface noun phrase, usually 1-4 words, such as "Seated man", "AMS unit", "Power socket", or "Power switch". Never combine distinct objects in one label.
+- `prompt` is a concise, visually grounded SAM3 description of only that target. Never combine distinct objects with "and" in one prompt.
+- `color` is a six-digit hex color. Use that exact same color for this target's tracking annotations and any explanatory annotations that indicate the same object.
+- Put a tight rect/polygon/circle around that exact target in its own `annotations` array when it can be localized confidently.
+- When tracking is appropriate, also populate legacy `tracking_prompt` and `tracking_annotations` from the first tracking target for compatibility.
+- If the user explicitly asks to track, follow, trace, or monitor objects, `tracking_targets` MUST contain one item per distinct requested object.
+- If there is no clearly trackable object, use an empty array for `tracking_targets`, an empty string for `tracking_prompt`, and an empty array for `tracking_annotations`.
 """
 
 RAG_SYSTEM_PROMPT = """You are a patient machine-manual tutor. The user uploads manufacturing equipment manuals and asks how to operate, maintain, or troubleshoot their machine.
@@ -100,9 +104,11 @@ def build_prompt(
         "- For words or logos, prefer tight rectangles around the exact letters.\n"
         "- For thumbnails or other tiny parts, annotate only the nail itself when visible, not the whole thumb.\n"
         "- Return one annotation per requested target when the user names distinct targets.\n"
-        "- If tracking is appropriate, return `tracking_prompt` and `tracking_annotations` for the single object of interest.\n"
-        "- An explicit user request to track, follow, trace, or monitor always makes tracking appropriate; return a concise non-empty `tracking_prompt` even if you cannot provide a box.\n"
-        "- The tracking annotation must be tighter than a general explanatory annotation and must identify only the object SAM3 should follow.\n"
+        "- If tracking is appropriate, return one `tracking_targets` item per distinct object class, with a short interface `label`, one-target `prompt`, shared hex `color`, and target-specific `annotations`.\n"
+        "- Keep each target's color identical across its explanatory annotation and tracking annotation.\n"
+        "- Never merge targets such as a person and an AMS unit, or a power socket and power switch, into one tracking prompt.\n"
+        "- An explicit user request to track, follow, trace, or monitor always makes tracking appropriate; return at least one tracking target even if you cannot provide a box.\n"
+        "- Each tracking annotation must be tighter than a general explanatory annotation and must identify only the object that target asks SAM3 to follow.\n"
         "- Do not invent manual details that are absent from the retrieved excerpts.\n"
         "- When relevant, mention the annotated region using the normalized coordinate frame."
     )
