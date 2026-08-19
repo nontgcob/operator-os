@@ -70,3 +70,17 @@ def test_prompt_includes_tight_annotation_quality_rules() -> None:
     assert "Return one annotation per requested target when the user names distinct targets" in prompt
     assert "one `tracking_targets` item per distinct object class" in prompt
     assert "Never merge targets such as a person and an AMS unit" in prompt
+
+
+def test_prompt_includes_notes_and_rejects_tracking_for_small_talk() -> None:
+    prompt = build_prompt(
+        "Hello, what AI are you using?",
+        [],
+        "No transcript.",
+        "No PDFs attached.",
+        additional_notes="Machine model: X200",
+    )
+
+    assert "Additional user-provided notes:\nMachine model: X200" in prompt
+    assert "Greetings, acknowledgements, general conversation" in prompt
+    assert "must not create tracking targets" in prompt

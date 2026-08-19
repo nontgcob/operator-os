@@ -509,6 +509,12 @@ button {
   font-size: 0.88rem;
 }
 
+.op-tracking-count {
+  color: var(--text-soft);
+  font-size: 0.76rem;
+  margin: 9px 0 0;
+}
+
 .op-layer-action,
 .op-tracking-layer-remove {
   background: transparent;
@@ -1077,11 +1083,78 @@ button {
   gap: 10px;
 }
 
+.op-additional-notes {
+  margin-top: 8px;
+  width: 100%;
+}
+
+.op-chat-stopped {
+  color: var(--text-soft);
+  font-size: 0.72rem;
+  font-weight: 600;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+}
+
+.op-chat-queue {
+  background: var(--bg-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.op-chat-queue-heading {
+  align-items: center;
+  display: flex;
+  font-size: 0.8rem;
+  justify-content: space-between;
+}
+
+.op-chat-queue-heading span,
+.op-chat-queue-number {
+  color: var(--text-soft);
+  font-size: 0.72rem;
+}
+
+.op-chat-queue-item {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 18px 1fr auto;
+}
+
+.op-chat-queue-item textarea {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  min-height: 42px;
+  padding: 8px;
+  resize: vertical;
+}
+
+.op-chat-queue-item button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--danger);
+  border-radius: 999px;
+  color: var(--danger);
+  display: inline-flex;
+  height: 24px;
+  justify-content: center;
+  padding: 0;
+  width: 24px;
+}
+
 .op-chat-input-row {
   align-items: stretch;
   display: grid;
   gap: 10px;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
 }
 
 .op-chat-input {
@@ -1104,6 +1177,16 @@ button {
 
 .op-send-button:hover:not(:disabled) {
   background: var(--primary-hover);
+}
+
+.op-stop-button {
+  align-self: start;
+  background: transparent;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-md);
+  color: var(--danger);
+  height: 48px;
+  padding: 0 14px;
 }
 
 .op-transcript-panel {

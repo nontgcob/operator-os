@@ -110,6 +110,7 @@ The default local path is no-Docker development. The launcher reads the reposito
 
 - `OPENROUTER_API_KEY` is required for VLM answers.
 - `OPENROUTER_PDF_ENGINE=native` is the default PDF handling mode.
+- To offer manuals before a run, place PDF files in `data/preloaded-manuals` (or set `RAGVLM_PRELOADED_DOCUMENT_DIR`). They appear as optional, unselected manuals in the UI after startup.
 - The default VLM model is `google/gemini-3.1-pro-preview`.
 - `WHISPER_ENABLED=true` enables Whisper transcription. If Whisper cannot run, the video service writes fallback timestamp segments so the rest of the system can still operate.
 - Real SAM3 tracking expects a local Ultralytics-compatible checkpoint at `models/sam3.pt`, or a path set by `SAM3_CHECKPOINT_PATH`.

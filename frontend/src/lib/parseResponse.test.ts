@@ -1,4 +1,4 @@
-import { parseModelResponse } from "@/lib/parseResponse";
+import { parseModelResponse, partialAnswerFromModelResponse } from "@/lib/parseResponse";
 
 describe("parseModelResponse", () => {
   it("keeps valid rect annotations and drops malformed ones", () => {
@@ -57,5 +57,17 @@ describe("parseModelResponse", () => {
         ],
       },
     ]);
+  });
+});
+
+describe("partialAnswerFromModelResponse", () => {
+  it("extracts and decodes the answer while JSON is still streaming", () => {
+    expect(partialAnswerFromModelResponse('{"answer":"First line\\nSecond')).toBe(
+      "First line\nSecond"
+    );
+  });
+
+  it("returns an empty string before the answer field arrives", () => {
+    expect(partialAnswerFromModelResponse('{"annotations":[')).toBe("");
   });
 });

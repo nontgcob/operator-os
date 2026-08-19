@@ -14,6 +14,7 @@ from rag.retrieval import (  # type: ignore  # noqa: E402
     get_document_status,
     ingest_document_bytes,
     retrieve_chunks,
+    sync_preloaded_documents,
 )
 
 
@@ -53,3 +54,20 @@ def test_pdf_ingest_stores_original_for_direct_vlm_use(tmp_path: Path) -> None:
             },
         }
     ]
+
+
+def test_preloaded_manuals_are_discovered_and_marked_as_preloaded(tmp_path: Path) -> None:
+    document_dir = tmp_path / "documents"
+    preload_dir = tmp_path / "preloaded"
+    preload_dir.mkdir()
+    (preload_dir / "machine-manual.pdf").write_bytes(b"%PDF-1.4\npreloaded")
+    configure_document_dir(document_dir)
+
+    first = sync_preloaded_documents(preload_dir)
+    second = sync_preloaded_documents(preload_dir)
+
+    assert first == second
+    assert len(first) == 1
+    assert first[0]["filename"] == "machine-manual.pdf"
+    assert first[0]["source"] == "preloaded"
+    assert first[0]["document_id"].startswith("preloaded-")

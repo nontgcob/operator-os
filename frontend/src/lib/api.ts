@@ -121,6 +121,13 @@ export async function uploadDocument(file: File): Promise<DocumentIngestResponse
   return response.json();
 }
 
+export async function getPreloadedDocuments(): Promise<DocumentIngestResponse[]> {
+  const response = await fetch(`${BASE_URL}/documents/preloaded`);
+  if (!response.ok) throw new Error(await readApiError(response));
+  const payload = (await response.json()) as { documents?: DocumentIngestResponse[] };
+  return Array.isArray(payload.documents) ? payload.documents : [];
+}
+
 export async function getDocumentStatus(documentId: string): Promise<DocumentStatusResponse> {
   const response = await fetch(
     `${BASE_URL}/documents/${encodeURIComponent(documentId)}/status`
@@ -141,11 +148,13 @@ export async function askQuestion(input: {
   transcript_window: TranscriptWindowResponse;
   document_ids: string[];
   model?: string;
-}): Promise<Response> {
+  additional_notes?: string;
+}, signal?: AbortSignal): Promise<Response> {
   return fetch(`${BASE_URL}/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
+    signal,
   });
 }
 
@@ -171,6 +180,7 @@ export async function askComparison(input: {
   document_ids: string[];
   model?: string;
   retry_of?: string;
+  additional_notes?: string;
 }): Promise<Response> {
   return fetch(`${BASE_URL}/chat/comparisons/stream`, {
     method: "POST",

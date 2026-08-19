@@ -206,3 +206,44 @@ export function parseModelResponse(raw: string): ParsedModelResponse {
 
   return { answer: raw, annotations: [], trackingPrompt: "", trackingAnnotations: [], trackingTargets: [] };
 }
+
+export function partialAnswerFromModelResponse(raw: string): string {
+  const match = /"answer"\s*:\s*"/.exec(raw);
+  if (!match) return raw.trimStart().startsWith("{") ? "" : raw;
+
+  let result = "";
+  let escaped = false;
+  for (let index = match.index + match[0].length; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (escaped) {
+      const escapes: Record<string, string> = {
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        b: "\b",
+        f: "\f",
+        n: "\n",
+        r: "\r",
+        t: "\t",
+      };
+      if (char === "u") {
+        const code = raw.slice(index + 1, index + 5);
+        if (/^[0-9a-f]{4}$/i.test(code)) {
+          result += String.fromCharCode(Number.parseInt(code, 16));
+          index += 4;
+        }
+      } else {
+        result += escapes[char] ?? char;
+      }
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') break;
+    result += char;
+  }
+  return result;
+}

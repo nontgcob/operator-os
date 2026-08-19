@@ -214,6 +214,7 @@ class ChatStreamRequest(BaseModel):
     transcript_window: TranscriptWindow
     document_ids: list[str] = Field(default_factory=list)
     model: str | None = None
+    additional_notes: str = ""
 
 
 class DocumentRetrieveRequest(BaseModel):
@@ -235,6 +236,7 @@ class ComparisonStreamRequest(BaseModel):
     transcript_window: TranscriptWindow | None = None
     model: str | None = None
     retry_of: str | None = None
+    additional_notes: str = ""
 
 
 class ComparisonRevealRequest(BaseModel):
@@ -446,6 +448,15 @@ async def document_ingest(
     return result
 
 
+@app.get("/documents/preloaded")
+async def preloaded_documents() -> Any:
+    async with httpx.AsyncClient(timeout=300) as client:
+        response = await client.get(f"{RAGVLM_SERVICE_URL}/documents/preloaded")
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    return response.json()
+
+
 async def _get_pipeline_status(url: str) -> dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -616,6 +627,7 @@ async def _request_comparison_pipeline(
         "annotations": payload.annotations,
         "transcript_segments": transcript_segments,
         "allow_model_knowledge": False,
+        "additional_notes": payload.additional_notes,
     }
     if payload.model:
         request_body["model"] = payload.model
@@ -792,6 +804,7 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
         "frame_data_url": _data_url_summary(payload.frame_data_url),
         "annotated_frame_data_url": _data_url_summary(payload.annotated_frame_data_url),
         "annotated_snapshot_sent": payload.annotated_frame_data_url is not None,
+        "additional_notes": payload.additional_notes,
     }
     _record_chat_message(
         session_id=payload.session_id,
@@ -811,6 +824,7 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
         "transcript_segments": [segment.model_dump() for segment in payload.transcript_window.segments],
         "document_ids": payload.document_ids,
         "conversation": _load_conversation(payload.session_id),
+        "additional_notes": payload.additional_notes,
     }
     if payload.model:
         request_body["model"] = payload.model

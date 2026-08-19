@@ -83,6 +83,7 @@ export interface DocumentIngestResponse {
   chunk_count: number;
   status?: string;
   pipelines?: Record<string, { status?: string; chunk_count?: number; error?: string }>;
+  source?: "user" | "preloaded";
 }
 
 export interface DocumentStatusResponse {

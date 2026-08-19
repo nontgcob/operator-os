@@ -26,6 +26,7 @@ try:
         get_document_status,
         ingest_document_bytes,
         reprocess_document,
+        sync_preloaded_documents,
     )
 except ImportError:
     from annotations import normalize_annotations
@@ -37,6 +38,7 @@ except ImportError:
         get_document_status,
         ingest_document_bytes,
         reprocess_document,
+        sync_preloaded_documents,
     )
 
 app = FastAPI(title="OperatorOS RAGVLM Service", version="0.1.0")
@@ -70,6 +72,7 @@ class InferRequest(BaseModel):
     document_ids: list[str] = Field(default_factory=list)
     conversation: list[dict[str, str]] = Field(default_factory=list)
     model: str = DEFAULT_MODEL
+    additional_notes: str = ""
 
 
 def _build_prompt(payload: InferRequest) -> str:
@@ -91,6 +94,7 @@ def _build_prompt(payload: InferRequest) -> str:
         docs,
         model_family=model_family_for(payload.model),
         video_title=payload.video_title,
+        additional_notes=payload.additional_notes,
     )
 
 
@@ -127,6 +131,14 @@ async def ingest_document(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/documents/preloaded")
+async def preloaded_documents() -> dict[str, Any]:
+    try:
+        return {"documents": sync_preloaded_documents()}
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to load preloaded manuals: {exc}") from exc
 
 
 @app.get("/documents/{document_id}/status")

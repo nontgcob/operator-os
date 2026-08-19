@@ -92,11 +92,9 @@ interface AnnotationControlsProps {
   canUndo: boolean;
   drawColor: string;
   isPaused: boolean;
-  strokeWidth: number;
   textAnnotation: string;
   onClear: () => void;
   onColorChange: (color: string) => void;
-  onStrokeWidthChange: (width: number) => void;
   onToolChange: (tool: AnnotationType) => void;
   onTextAnnotationChange: (text: string) => void;
   onUndo: () => void;
@@ -108,11 +106,9 @@ export function AnnotationControls({
   canUndo,
   drawColor,
   isPaused,
-  strokeWidth,
   textAnnotation,
   onClear,
   onColorChange,
-  onStrokeWidthChange,
   onToolChange,
   onTextAnnotationChange,
   onUndo,
@@ -164,18 +160,6 @@ export function AnnotationControls({
             style={{ background: color }}
           />
         ))}
-        <label className="op-width-control">
-          <span className="op-width-label">Width</span>
-          <input
-            type="range"
-            min={1}
-            max={8}
-            value={strokeWidth}
-            onChange={(event) => onStrokeWidthChange(Number(event.target.value))}
-            style={{ accentColor: drawColor === "#ffffff" ? "#6366f1" : drawColor }}
-          />
-          <span className="op-width-value">{strokeWidth}</span>
-        </label>
       </div>
 
       {activeTool === "text" && (

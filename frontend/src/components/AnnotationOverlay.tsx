@@ -6,6 +6,7 @@ import type { Annotation, AnnotationType, AnnotationUndoEntry, Point, TrackingOv
 
 const ANNOTATION_SCALE = 1.5;
 const MIN_DRAG_DISTANCE = 10;
+const USER_STROKE_WIDTH = 1;
 
 interface AnnotationOverlayProps {
   activeTool: AnnotationType;
@@ -14,7 +15,6 @@ interface AnnotationOverlayProps {
   trackingOverlays?: TrackingOverlay[];
   drawColor: string;
   isPaused: boolean;
-  strokeWidth: number;
   textAnnotation: string;
   videoAspectRatio: number;
   onAnnotationsChange: (annotations: Annotation[]) => void;
@@ -126,6 +126,28 @@ function toolCursor(tool: AnnotationType) {
   if (tool === "select") return "default";
   if (tool === "eraser") return "cell";
   return "crosshair";
+}
+
+function annotationLabelPoint(annotation: Annotation): Point | null {
+  if (annotation.type === "rect" || annotation.type === "text" || annotation.type === "number") {
+    return annotation.x !== undefined && annotation.y !== undefined
+      ? { x: v(annotation.x), y: v(annotation.y) }
+      : null;
+  }
+  if (annotation.type === "circle") {
+    const x = annotation.cx ?? annotation.x;
+    const y = annotation.cy ?? annotation.y;
+    return x !== undefined && y !== undefined ? { x: v(x), y: v(y) } : null;
+  }
+  if (annotation.type === "arrow") {
+    return annotation.x1 !== undefined && annotation.y1 !== undefined
+      ? { x: v(annotation.x1), y: v(annotation.y1) }
+      : null;
+  }
+  const firstPoint = annotation.points?.[0];
+  if (Array.isArray(firstPoint)) return { x: v(firstPoint[0]), y: v(firstPoint[1]) };
+  if (firstPoint) return { x: v(firstPoint.x), y: v(firstPoint.y) };
+  return null;
 }
 
 function renderAnnotation(
@@ -328,7 +350,6 @@ export function AnnotationOverlay({
   trackingOverlays = [],
   drawColor,
   isPaused,
-  strokeWidth,
   textAnnotation,
   videoAspectRatio,
   onAnnotationsChange,
@@ -338,7 +359,6 @@ export function AnnotationOverlay({
   const annotationsRef = useRef(annotations);
   const activeToolRef = useRef(activeTool);
   const drawColorRef = useRef(drawColor);
-  const strokeWidthRef = useRef(strokeWidth);
   const dragRef = useRef<{
     idx: number;
     lastPoint: Point;
@@ -359,8 +379,7 @@ export function AnnotationOverlay({
   useEffect(() => {
     activeToolRef.current = activeTool;
     drawColorRef.current = drawColor;
-    strokeWidthRef.current = strokeWidth;
-  }, [activeTool, drawColor, strokeWidth]);
+  }, [activeTool, drawColor]);
 
   const resetDraftAnnotation = useCallback(() => {
     isDrawingRef.current = false;
@@ -382,7 +401,7 @@ export function AnnotationOverlay({
     const point = getSvgPoint(event);
     const tool = activeToolRef.current;
     const color = drawColorRef.current;
-    const scaledStroke = strokeWidthRef.current * 5;
+    const scaledStroke = USER_STROKE_WIDTH * 5;
 
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -446,7 +465,7 @@ export function AnnotationOverlay({
     if (!isPaused) return;
     const point = getSvgPoint(event);
     const color = drawColorRef.current;
-    const scaledStroke = strokeWidthRef.current * 5;
+    const scaledStroke = USER_STROKE_WIDTH * 5;
     const tool = activeToolRef.current;
 
     if (tool === "eraser" && isDrawingRef.current) {
@@ -596,12 +615,27 @@ export function AnnotationOverlay({
           style={{ pointerEvents: "none" }}
         />
       ))}
-      {modelAnnotations.map((annotation, idx) =>
-        renderAnnotation(annotation, -(idx + 1), {
-          aspectRatio: videoAspectRatio,
-          interactive: false,
-        })
-      )}
+      {modelAnnotations.map((annotation, idx) => {
+        const labelPoint = annotationLabelPoint(annotation);
+        const labelX = Math.min(80, Math.max(0, labelPoint?.x ?? 0));
+        const labelY = Math.min(96, Math.max(4, (labelPoint?.y ?? 4) - 1));
+        return (
+          <g key={`machine-annotation-${idx}`} style={{ pointerEvents: "none" }}>
+            {renderAnnotation(annotation, -(idx + 1), {
+              aspectRatio: videoAspectRatio,
+              interactive: false,
+            })}
+            {labelPoint && (
+              <g transform={`translate(${labelX} ${labelY})`}>
+                <rect x={0} y={-3.2} width={18.5} height={3.8} rx={0.8} fill="#111827" opacity={0.9} />
+                <text x={1} y={-0.6} fill="#ffffff" fontSize={1.65} fontWeight={700}>
+                  Machine annotation
+                </text>
+              </g>
+            )}
+          </g>
+        );
+      })}
       {annotations.map((annotation, idx) =>
         renderAnnotation(annotation, idx, {
           aspectRatio: videoAspectRatio,

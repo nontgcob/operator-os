@@ -20,6 +20,9 @@ if load_env_file:
     load_env_file()
 
 DOCUMENT_DIR = Path(os.getenv("RAGVLM_DOCUMENT_DIR", "data/ragvlm/documents"))
+PRELOADED_DOCUMENT_DIR = Path(
+    os.getenv("RAGVLM_PRELOADED_DOCUMENT_DIR", "data/preloaded-manuals")
+)
 INDEX_FILENAME = "index.json"
 ORIGINALS_DIRNAME = "originals"
 ARTIFACTS_DIRNAME = "artifacts"
@@ -121,12 +124,13 @@ def _record_for_upload(
     content_type: str | None,
     size_bytes: int,
     original_path: Path,
+    source: str,
 ) -> dict[str, Any]:
     now = time.time()
     return {
         "id": document_id,
         "name": filename,
-        "source": "user",
+        "source": source,
         "content_type": content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream",
         "created_at": now,
         "updated_at": now,
@@ -179,6 +183,7 @@ def ingest_document_bytes(
     filename: str,
     content_type: str | None = None,
     document_id: str | None = None,
+    source: str = "user",
     **_: Any,
 ) -> dict[str, Any]:
     _ensure_document_dir()
@@ -195,6 +200,7 @@ def ingest_document_bytes(
         content_type=content_type,
         size_bytes=len(data),
         original_path=original_path,
+        source=source,
     )
     _upsert_document(document)
     _write_status(document)
@@ -207,6 +213,42 @@ def ingest_document_bytes(
         "citation_status": document["citation_status"],
         "interaction_mode": document["interaction_mode"],
     }
+
+
+def sync_preloaded_documents(root: Path | None = None) -> list[dict[str, Any]]:
+    resolved_root = root or PRELOADED_DOCUMENT_DIR
+    if not resolved_root.exists():
+        return []
+
+    documents: list[dict[str, Any]] = []
+    for path in sorted(resolved_root.rglob("*.pdf"), key=lambda item: str(item).lower()):
+        if not path.is_file():
+            continue
+        relative_name = path.relative_to(resolved_root).as_posix()
+        document_id = f"preloaded-{hashlib.sha256(relative_name.lower().encode('utf-8')).hexdigest()[:16]}"
+        data = path.read_bytes()
+        checksum = hashlib.sha256(data).hexdigest()
+        existing = get_document_record(document_id)
+        if existing is None or existing.get("checksum") != checksum or _find_original_path(document_id) is None:
+            result = ingest_document_bytes(
+                data,
+                filename=path.name,
+                content_type="application/pdf",
+                document_id=document_id,
+                source="preloaded",
+            )
+        else:
+            result = {
+                "document_id": document_id,
+                "document_version": existing.get("version"),
+                "filename": existing.get("name", path.name),
+                "chunk_count": 0,
+                "status": existing.get("processing_status", "queryable"),
+                "citation_status": existing.get("citation_status", "model_native"),
+                "interaction_mode": existing.get("interaction_mode", "direct_pdf_vlm"),
+            }
+        documents.append({**result, "source": "preloaded"})
+    return documents
 
 
 def stage_document_bytes(

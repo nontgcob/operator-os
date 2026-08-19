@@ -62,6 +62,8 @@ OPERATOROS_VIDEO_CONTEXT = """You are OperatorOS, an industrial multimodal assis
 - When a video title is provided, treat it as grounding context for what the clip is about.
 - Explain spatial relationships precisely when annotations are present.
 - If the frame, transcript, or documents do not support an answer, say what is uncertain.
+- Decide whether tracking is useful for the request. Greetings, acknowledgements, general conversation, and questions that only need a still-frame or document answer must not create tracking targets.
+- Create tracking targets only when the user explicitly requests tracking or following an object's motion through time is necessary to answer.
 - Return SketchVLM JSON so OperatorOS can render your visual explanation as an overlay on the video frame.
 """
 
@@ -82,6 +84,7 @@ def build_prompt(
     *,
     model_family: str = "custom",
     video_title: str | None = None,
+    additional_notes: str = "",
 ) -> str:
     base_prompt = f"{OPERATOROS_VIDEO_CONTEXT}\n\n{SKETCHVLM_SYSTEM_PROMPT}\n\n{RAG_SYSTEM_PROMPT}"
     title_section = (
@@ -89,10 +92,16 @@ def build_prompt(
         if isinstance(video_title, str) and video_title.strip()
         else ""
     )
+    notes_section = (
+        f"Additional user-provided notes:\n{additional_notes.strip()}\n\n"
+        if additional_notes.strip()
+        else "Additional user-provided notes:\nNone.\n\n"
+    )
     return (
         f"{base_prompt}\n\n"
         f"Model family: {model_family}\n\n"
         f"{title_section}"
+        f"{notes_section}"
         f"Question:\n{question}\n\n"
         f"Normalized annotations:\n{_format_annotations(annotations)}\n\n"
         f"Transcript window:\n{transcript}\n\n"

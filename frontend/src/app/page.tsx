@@ -13,8 +13,9 @@ import {
   revealTurn,
 } from "@/lib/comparisonState";
 import { readComparisonSSE } from "@/lib/comparisonStream";
-import { parseModelResponse } from "@/lib/parseResponse";
+import { parseModelResponse, partialAnswerFromModelResponse } from "@/lib/parseResponse";
 import { explicitlyRequestsTracking } from "@/lib/trackingIntent";
+import { excludeTrackedTargets } from "@/lib/trackingDedup";
 import { colorizeTrackingTargets, createTrackingLayers } from "@/lib/trackingLayers";
 import {
   askComparison,
@@ -23,6 +24,7 @@ import {
   clearChatSession,
   revealComparison,
   getMediaSourceUrl,
+  getPreloadedDocuments,
   getTrackingOverlays,
   getDocumentStatus,
   getTranscriptWindow,
@@ -56,12 +58,27 @@ interface ChatMessage {
   annotatedSnapshot?: boolean;
   comparison?: ComparisonTurn;
   comparisonQuestion?: string;
+  cancelled?: boolean;
 }
 
 interface UploadedDocument {
   id: string;
   filename: string;
   chunkCount: number;
+  source: "user" | "preloaded";
+}
+
+interface QueuedChatMessage {
+  id: string;
+  text: string;
+  createdAt: string;
+  model: string;
+  timestamp: number;
+  documentIds: string[];
+  documentNames: string[];
+  annotations: Annotation[];
+  includeAnnotatedSnapshot: boolean;
+  additionalNotes: string;
 }
 
 interface ActiveTrackingJob {
@@ -262,6 +279,7 @@ export default function Home() {
   const [videoTitle, setVideoTitle] = useState<string>("");
   const [sessionId] = useState(() => crypto.randomUUID());
   const [question, setQuestion] = useState("");
+  const [additionalNotes, setAdditionalNotes] = useState("");
   const [selectedModel, setSelectedModel] = useState(DEFAULT_RAGVLM_MODEL);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [documents, setDocuments] = useState<UploadedDocument[]>([]);
@@ -271,6 +289,8 @@ export default function Home() {
   const [documentError, setDocumentError] = useState("");
   const [revealingComparisonId, setRevealingComparisonId] = useState("");
   const [loading, setLoading] = useState(false);
+  const [stoppingResponse, setStoppingResponse] = useState(false);
+  const [queuedChatMessages, setQueuedChatMessages] = useState<QueuedChatMessage[]>([]);
   const [ingesting, setIngesting] = useState(false);
   const [ingestError, setIngestError] = useState("");
   const [ingestStatus, setIngestStatus] = useState("");
@@ -296,11 +316,16 @@ export default function Home() {
   const [activeTool, setActiveTool] = useState<AnnotationType>("cursor");
   const [annotationUndoStack, setAnnotationUndoStack] = useState<AnnotationUndoEntry[]>([]);
   const [drawColor, setDrawColor] = useState("#ef4444");
-  const [strokeWidth, setStrokeWidth] = useState(3);
   const [textAnnotation, setTextAnnotation] = useState("");
   const [showTranscript, setShowTranscript] = useState(false);
   const localFileInputRef = useRef<HTMLInputElement | null>(null);
   const trackingEventSourcesRef = useRef<Map<string, EventSource>>(new Map());
+  const activeChatAbortRef = useRef<AbortController | null>(null);
+  const processingChatRef = useRef(false);
+  const queuedChatMessagesRef = useRef<QueuedChatMessage[]>([]);
+  const trackingLayersRef = useRef<TrackingLayer[]>([]);
+  const activeTrackingJobsRef = useRef<ActiveTrackingJob[]>([]);
+  const contextGenerationRef = useRef(0);
 
   useEffect(() => {
     const savedTheme = window.localStorage.getItem("operatoros-theme");
@@ -313,6 +338,45 @@ export default function Home() {
     setTheme(resolvedTheme);
     document.documentElement.dataset.theme = resolvedTheme;
   }, []);
+
+  useEffect(() => {
+    trackingLayersRef.current = trackingLayers;
+  }, [trackingLayers]);
+
+  useEffect(() => {
+    activeTrackingJobsRef.current = activeTrackingJobs;
+  }, [activeTrackingJobs]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadPreloadedManuals() {
+      try {
+        const preloaded = await getPreloadedDocuments();
+        if (cancelled) return;
+        setDocuments((current) => {
+          const byId = new Map(current.map((document) => [document.id, document]));
+          preloaded.forEach((document) => {
+            byId.set(document.document_id, {
+              id: document.document_id,
+              filename: document.filename,
+              chunkCount: document.chunk_count,
+              source: "preloaded",
+            });
+          });
+          return [...byId.values()];
+        });
+        setDocumentError((current) =>
+          current.startsWith("Preloaded manuals unavailable:") ? "" : current
+        );
+      } catch (error) {
+        if (!cancelled) setDocumentError(`Preloaded manuals unavailable: ${errorMessage(error)}`);
+      }
+    }
+    void loadPreloadedManuals();
+    return () => {
+      cancelled = true;
+    };
+  }, [videoId]);
 
   function toggleTheme() {
     setTheme((current) => {
@@ -328,7 +392,42 @@ export default function Home() {
     trackingEventSourcesRef.current.clear();
   }
 
+  function replaceQueuedChatMessages(
+    updater: (current: QueuedChatMessage[]) => QueuedChatMessage[]
+  ) {
+    const next = updater(queuedChatMessagesRef.current);
+    queuedChatMessagesRef.current = next;
+    setQueuedChatMessages(next);
+  }
+
+  function replaceTrackingLayers(
+    updater: TrackingLayer[] | ((current: TrackingLayer[]) => TrackingLayer[])
+  ) {
+    const next = typeof updater === "function" ? updater(trackingLayersRef.current) : updater;
+    trackingLayersRef.current = next;
+    setTrackingLayers(next);
+  }
+
+  function replaceActiveTrackingJobs(
+    updater: ActiveTrackingJob[] | ((current: ActiveTrackingJob[]) => ActiveTrackingJob[])
+  ) {
+    const next = typeof updater === "function" ? updater(activeTrackingJobsRef.current) : updater;
+    activeTrackingJobsRef.current = next;
+    setActiveTrackingJobs(next);
+  }
+
+  function stopActiveResponse() {
+    if (!activeChatAbortRef.current) return;
+    setStoppingResponse(true);
+    activeChatAbortRef.current.abort();
+  }
+
   function resetVideoContext() {
+    contextGenerationRef.current += 1;
+    activeChatAbortRef.current?.abort();
+    activeChatAbortRef.current = null;
+    processingChatRef.current = false;
+    replaceQueuedChatMessages(() => []);
     closeTrackingEventSources();
     if (videoUrl && videoUrl.startsWith("blob:")) {
       URL.revokeObjectURL(videoUrl);
@@ -350,12 +449,15 @@ export default function Home() {
     setAnnotations([]);
     setModelAnnotations([]);
     setAnnotationUndoStack([]);
-    setTrackingLayers([]);
-    setActiveTrackingJobs([]);
+    replaceTrackingLayers([]);
+    replaceActiveTrackingJobs([]);
     setTrackingStatus("");
     setTrackingError("");
     setChatMessages([]);
     setChatClearStatus("");
+    setAdditionalNotes("");
+    setStoppingResponse(false);
+    setLoading(false);
   }
 
   function downloadChat() {
@@ -380,6 +482,7 @@ export default function Home() {
             ? `Annotated snapshot: ${message.annotatedSnapshot ? "sent" : "not sent"}`
             : "",
           message.error ? "Status: error" : "",
+          message.cancelled ? "Status: stopped" : "",
         ].filter(Boolean);
         return [
           `## ${message.role === "user" ? "User" : "Operator OS"} — ${new Date(message.createdAt).toLocaleString()}`,
@@ -409,7 +512,7 @@ export default function Home() {
 
   function removeTracking() {
     if (!trackingLayers.length) return;
-    setTrackingLayers([]);
+    replaceTrackingLayers([]);
     setTrackingStatus("All tracking items removed.");
     setTrackingError("");
   }
@@ -421,7 +524,7 @@ export default function Home() {
     );
     if (!confirmed) return;
 
-    setActiveTrackingJobs((current) =>
+    replaceActiveTrackingJobs((current) =>
       current.map((candidate) =>
         candidate.id === job.id
           ? { ...candidate, cancelling: true, status: "Cancelling tracking..." }
@@ -431,7 +534,7 @@ export default function Home() {
     try {
       await cancelTracking(job.id);
     } catch (error) {
-      setActiveTrackingJobs((current) =>
+      replaceActiveTrackingJobs((current) =>
         current.map((candidate) =>
           candidate.id === job.id
             ? {
@@ -449,7 +552,7 @@ export default function Home() {
     setAnnotations([]);
     setModelAnnotations([]);
     setAnnotationUndoStack([]);
-    setTrackingLayers([]);
+    replaceTrackingLayers([]);
     setTrackingStatus("");
     setTrackingError("");
     setShowTrackingOverlays(false);
@@ -461,14 +564,55 @@ export default function Home() {
     }
   }
 
-  async function clearChatHistory() {
+  async function clearAllContext() {
+    const confirmed = window.confirm(
+      "Clear all conversation, annotations, tracking, notes, and queued work? The video, cached transcript, PDFs, and PDF selections will be kept."
+    );
+    if (!confirmed) return;
+
+    contextGenerationRef.current += 1;
+    activeChatAbortRef.current?.abort();
+    activeChatAbortRef.current = null;
+    processingChatRef.current = false;
+    replaceQueuedChatMessages(() => []);
+    const jobsToCancel = activeTrackingJobsRef.current;
+    await Promise.allSettled(jobsToCancel.map((job) => cancelTracking(job.id)));
+    closeTrackingEventSources();
+
     setChatMessages([]);
-    setChatClearStatus("Clearing conversation memory...");
+    setQuestion("");
+    setAdditionalNotes("");
+    setAnnotations([]);
+    setModelAnnotations([]);
+    setAnnotationUndoStack([]);
+    replaceTrackingLayers([]);
+    replaceActiveTrackingJobs([]);
+    setTrackingStatus("");
+    setTrackingError("");
+    setShowTrackingOverlays(false);
+    setTrackingEnabled(false);
+    setSendAnnotatedSnapshot(false);
+    setActiveTool("cursor");
+    setTextAnnotation("");
+    setShowTranscript(false);
+    setRevealingComparisonId("");
+    setSelectedModel(DEFAULT_RAGVLM_MODEL);
+    setStoppingResponse(false);
+    setLoading(false);
+    setDocumentStatus("");
+    setDocumentError("");
+    setChatClearStatus("Clearing all conversation context...");
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.currentTime = 0;
+    }
+    setTimestamp(0);
+    setVideoTimeOffset(0);
     try {
       await clearChatSession(sessionId);
-      setChatClearStatus("Conversation memory cleared.");
+      setChatClearStatus("All context cleared. Video, transcript, PDFs, and PDF selections were kept.");
     } catch (error) {
-      setChatClearStatus(`Visible chat cleared, but backend memory was not cleared: ${errorMessage(error)}`);
+      setChatClearStatus(`Local context cleared, but backend conversation memory could not be cleared: ${errorMessage(error)}`);
     }
   }
 
@@ -683,6 +827,7 @@ export default function Home() {
           id: result.document_id,
           filename: result.filename,
           chunkCount: 0,
+          source: "user" as const,
         };
         return [...current.filter((document) => document.id !== result.document_id), nextDocument];
       });
@@ -791,20 +936,47 @@ export default function Home() {
     }
   }
 
-  async function handleAsk(event: FormEvent) {
+  function handleAsk(event: FormEvent) {
     event.preventDefault();
     const trimmedQuestion = question.trim();
     const videoReady = Boolean(videoId && videoMetadataLoaded);
     if (!videoReady || !trimmedQuestion) return;
-    const sourceTimestamp = timestamp + videoTimeOffset;
+    const request: QueuedChatMessage = {
+      id: crypto.randomUUID(),
+      text: trimmedQuestion,
+      createdAt: new Date().toISOString(),
+      model: selectedModel,
+      timestamp: timestamp + videoTimeOffset,
+      documentIds: [...selectedDocumentIds],
+      documentNames: documents
+        .filter((document) => selectedDocumentIds.includes(document.id))
+        .map((document) => document.filename),
+      annotations: annotations.map((annotation) => ({ ...annotation })),
+      includeAnnotatedSnapshot: sendAnnotatedSnapshot,
+      additionalNotes: additionalNotes.trim(),
+    };
+    setQuestion("");
+    setChatClearStatus("");
+    if (processingChatRef.current || loading) {
+      replaceQueuedChatMessages((current) => [...current, request]);
+      return;
+    }
+    void processChatMessage(request);
+  }
+
+  async function processChatMessage(request: QueuedChatMessage) {
+    if (!videoId || !videoMetadataLoaded) return;
+    const requestGeneration = contextGenerationRef.current;
+    processingChatRef.current = true;
     setLoading(true);
-    const attachedDocuments = documents
-      .filter((document) => selectedDocumentIds.includes(document.id))
-      .map((document) => document.filename);
-    const includeAnnotatedSnapshot = sendAnnotatedSnapshot;
+    setStoppingResponse(false);
+    const abortController = new AbortController();
+    activeChatAbortRef.current = abortController;
+    const trimmedQuestion = request.text.trim();
+    const sourceTimestamp = request.timestamp;
     const userMessageId = crypto.randomUUID();
     const assistantMessageId = crypto.randomUUID();
-    const createdAt = new Date().toISOString();
+    const createdAt = request.createdAt;
     setChatMessages((prev) => [
       ...prev,
       {
@@ -812,23 +984,21 @@ export default function Home() {
         role: "user",
         content: trimmedQuestion,
         createdAt,
-        documents: attachedDocuments,
-        annotatedSnapshot: includeAnnotatedSnapshot,
+        documents: request.documentNames,
+        annotatedSnapshot: request.includeAnnotatedSnapshot,
       },
       {
         id: assistantMessageId,
         role: "assistant",
         content: "Thinking...",
         createdAt,
-        model: selectedModel,
+        model: request.model,
       },
     ]);
-    setQuestion("");
-    setChatClearStatus("");
 
     try {
       const frameData = await captureFrame();
-      const annotatedFrameData = includeAnnotatedSnapshot ? await captureAnnotatedFrame() : undefined;
+      const annotatedFrameData = request.includeAnnotatedSnapshot ? await captureAnnotatedFrame() : undefined;
       const transcript = await loadTranscriptWindow(videoId, sourceTimestamp);
 
       const response = await askQuestion({
@@ -839,11 +1009,12 @@ export default function Home() {
         frame_data_url: frameData,
         annotated_frame_data_url: annotatedFrameData,
         question: trimmedQuestion,
-        annotations,
+        annotations: request.annotations,
         transcript_window: transcript,
-        document_ids: selectedDocumentIds,
-        model: selectedModel,
-      });
+        document_ids: request.documentIds,
+        model: request.model,
+        additional_notes: request.additionalNotes,
+      }, abortController.signal);
       if (!response.ok) {
         throw new Error(await response.text());
       }
@@ -851,12 +1022,23 @@ export default function Home() {
       await readSSE(response, {
         onDelta: (chunk) => {
           rawAssistantText += chunk;
+          const partial = partialAnswerFromModelResponse(rawAssistantText);
+          if (partial) {
+            setChatMessages((prev) =>
+              prev.map((message) =>
+                message.id === assistantMessageId ? { ...message, content: partial } : message
+              )
+            );
+          }
         },
         onError: (message) => {
           throw new Error(message);
         },
       });
       const parsed = parseModelResponse(rawAssistantText);
+      if (abortController.signal.aborted || requestGeneration !== contextGenerationRef.current) {
+        return;
+      }
       setChatMessages((prev) =>
         prev.map((message) =>
           message.id === assistantMessageId
@@ -884,7 +1066,7 @@ export default function Home() {
         parsed.trackingTargets.length > 0 ||
         Boolean(parsed.trackingPrompt.trim()) ||
         parsed.trackingAnnotations.length > 0;
-      const shouldStartTracking = explicitTrackingRequest || trackingEnabled || modelSuggestsTracking;
+      const shouldStartTracking = explicitTrackingRequest || (trackingEnabled && modelSuggestsTracking);
 
       if (shouldStartTracking) {
         const video = videoRef.current;
@@ -898,7 +1080,7 @@ export default function Home() {
 
         const trackingAnnotations = parsed.trackingAnnotations.length
           ? parsed.trackingAnnotations
-          : trackingEnabled && !explicitTrackingRequest
+          : modelSuggestsTracking
             ? parsed.annotations
             : [];
 
@@ -913,13 +1095,33 @@ export default function Home() {
                 annotations: trackingAnnotations,
               },
             ];
-        const trackingTargets = colorizeTrackingTargets({
+        const coloredTrackingTargets = colorizeTrackingTargets({
           targets: baseTrackingTargets,
           annotations: parsed.annotations,
           colorOffset:
-            trackingLayers.length +
-            activeTrackingJobs.reduce((count, job) => count + job.progress.length, 0),
+            trackingLayersRef.current.length +
+            activeTrackingJobsRef.current.reduce((count, job) => count + job.progress.length, 0),
         });
+        const existingTrackingLabels = [
+          ...trackingLayersRef.current.map((layer) => layer.label),
+          ...activeTrackingJobsRef.current.flatMap((job) => job.progress.map((target) => target.label)),
+        ];
+        const { targets: trackingTargets, duplicates } = excludeTrackedTargets(
+          coloredTrackingTargets,
+          existingTrackingLabels
+        );
+        if (!trackingTargets.length) {
+          const duplicateNames = duplicates.map((target) => target.label).join(", ");
+          setTrackingStatus(
+            `${duplicateNames || "That item"} ${duplicates.length === 1 ? "is" : "are"} already tracked.`
+          );
+          return;
+        }
+        if (duplicates.length) {
+          setTrackingStatus(
+            `Skipped already tracked ${duplicates.map((target) => target.label).join(", ")}; preparing new items.`
+          );
+        }
         const targetAnnotations = trackingTargets.flatMap((target) => target.annotations);
         const linkedMachineAnnotations = targetAnnotations.length
           ? targetAnnotations
@@ -964,7 +1166,7 @@ export default function Home() {
             targets: trackingTargets,
           });
           const trackingJobId = tracking.tracking_job_id;
-          setActiveTrackingJobs((current) => [
+          replaceActiveTrackingJobs((current) => [
             ...current,
             {
               id: trackingJobId,
@@ -997,7 +1199,7 @@ export default function Home() {
             };
             if (payload.tracking_job_id && payload.tracking_job_id !== trackingJobId) return;
             if (payload.error?.message) {
-              setActiveTrackingJobs((current) =>
+              replaceActiveTrackingJobs((current) =>
                 current.map((job) =>
                   job.id === trackingJobId
                     ? {
@@ -1021,7 +1223,7 @@ export default function Home() {
             const nextStatus = `${backendLabel}: ${stageLabel}${
               payload.progress !== undefined ? ` (${payload.progress}%)` : ""
             }`;
-            setActiveTrackingJobs((current) =>
+            replaceActiveTrackingJobs((current) =>
               current.map((job) =>
                 job.id === trackingJobId
                   ? {
@@ -1049,7 +1251,7 @@ export default function Home() {
                   if (!layerCount) {
                     setTrackingError("SAM3 completed but did not return any trackable masks.");
                   } else {
-                    setTrackingLayers((currentLayers) => {
+                    replaceTrackingLayers((currentLayers) => {
                       const nextRound = Math.max(0, ...currentLayers.map((layer) => layer.round)) + 1;
                       return [
                         ...currentLayers,
@@ -1074,14 +1276,14 @@ export default function Home() {
               } else {
                 setTrackingError(payload.error.message ?? "Tracking failed.");
               }
-              setActiveTrackingJobs((current) => current.filter((job) => job.id !== trackingJobId));
+              replaceActiveTrackingJobs((current) => current.filter((job) => job.id !== trackingJobId));
               events.close();
               trackingEventSourcesRef.current.delete(trackingJobId);
             }
           };
           events.onerror = () => {
             if (completionHandled) return;
-            setActiveTrackingJobs((current) =>
+            replaceActiveTrackingJobs((current) =>
               current.map((job) =>
                 job.id === trackingJobId
                   ? { ...job, status: "Reconnecting to tracking progress..." }
@@ -1096,6 +1298,18 @@ export default function Home() {
         }
       }
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setChatMessages((prev) => {
+          const currentAssistant = prev.find((message) => message.id === assistantMessageId);
+          if (!currentAssistant || currentAssistant.content === "Thinking...") {
+            return prev.filter((message) => message.id !== assistantMessageId);
+          }
+          return prev.map((message) =>
+            message.id === assistantMessageId ? { ...message, cancelled: true } : message
+          );
+        });
+        return;
+      }
       const message = error instanceof Error ? error.message : "Question failed";
       setChatMessages((prev) =>
         prev.map((chatMessage) =>
@@ -1105,7 +1319,23 @@ export default function Home() {
         )
       );
     } finally {
+      if (activeChatAbortRef.current === abortController) {
+        activeChatAbortRef.current = null;
+      }
+      processingChatRef.current = false;
+      setStoppingResponse(false);
       setLoading(false);
+      if (requestGeneration === contextGenerationRef.current) {
+        const queue = queuedChatMessagesRef.current;
+        const nextIndex = queue.findIndex((item) => item.text.trim());
+        if (nextIndex >= 0) {
+          const next = { ...queue[nextIndex], text: queue[nextIndex].text.trim() };
+          replaceQueuedChatMessages((current) => current.slice(nextIndex + 1));
+          window.setTimeout(() => void processChatMessage(next), 0);
+        } else if (queue.length) {
+          replaceQueuedChatMessages(() => []);
+        }
+      }
     }
   }
 
@@ -1252,6 +1482,8 @@ export default function Home() {
       !message.comparison.revealed
   );
   const liveTrackingOverlays = activeTrackingJobs.flatMap((job) => job.liveOverlays);
+  const visibleTrackingCount = trackingLayers.filter((layer) => layer.visible).length;
+  const totalTrackingCount = trackingLayers.length;
 
   return (
     <div className="op-shell">
@@ -1358,11 +1590,9 @@ export default function Home() {
             canUndo={annotationUndoStack.length > 0}
             drawColor={drawColor}
             isPaused={isPaused}
-            strokeWidth={strokeWidth}
             textAnnotation={textAnnotation}
             onClear={clearAnnotations}
             onColorChange={setDrawColor}
-            onStrokeWidthChange={setStrokeWidth}
             onToolChange={setActiveTool}
             onTextAnnotationChange={setTextAnnotation}
             onUndo={undoAnnotation}
@@ -1447,7 +1677,6 @@ export default function Home() {
                 modelAnnotations={modelAnnotations}
                 drawColor={drawColor}
                 isPaused={isPaused}
-                strokeWidth={strokeWidth}
                 textAnnotation={textAnnotation}
                 videoAspectRatio={videoAspectRatio}
                 onAnnotationsChange={setAnnotations}
@@ -1522,7 +1751,7 @@ export default function Home() {
                     type="button"
                     className="op-layer-action"
                     disabled={!trackingLayers.length}
-                    onClick={() => setTrackingLayers((layers) => layers.map((layer) => ({ ...layer, visible: true })))}
+                    onClick={() => replaceTrackingLayers((layers) => layers.map((layer) => ({ ...layer, visible: true })))}
                   >
                     Show all
                   </button>
@@ -1530,7 +1759,7 @@ export default function Home() {
                     type="button"
                     className="op-layer-action"
                     disabled={!trackingLayers.length}
-                    onClick={() => setTrackingLayers((layers) => layers.map((layer) => ({ ...layer, visible: false })))}
+                    onClick={() => replaceTrackingLayers((layers) => layers.map((layer) => ({ ...layer, visible: false })))}
                   >
                     Hide all
                   </button>
@@ -1553,7 +1782,7 @@ export default function Home() {
                               checked={layer.visible}
                               aria-label={`Show ${layer.label}`}
                               onChange={(event) =>
-                                setTrackingLayers((layers) =>
+                                replaceTrackingLayers((layers) =>
                                   layers.map((candidate) =>
                                     candidate.id === layer.id
                                       ? { ...candidate, visible: event.target.checked }
@@ -1569,7 +1798,7 @@ export default function Home() {
                               aria-label={`Color for ${layer.label}`}
                               onChange={(event) => {
                                 const nextColor = event.target.value;
-                                setTrackingLayers((layers) =>
+                                replaceTrackingLayers((layers) =>
                                   layers.map((candidate) =>
                                     candidate.id === layer.id
                                       ? {
@@ -1601,9 +1830,16 @@ export default function Home() {
                               className="op-tracking-layer-remove"
                               aria-label={`Remove ${layer.label}`}
                               title="Remove this tracking item"
-                              onClick={() =>
-                                setTrackingLayers((layers) => layers.filter((candidate) => candidate.id !== layer.id))
-                              }
+                              onClick={() => {
+                                const confirmed = window.confirm(
+                                  `Remove the tracking mask for "${layer.label}"? You can track it again afterward.`
+                                );
+                                if (confirmed) {
+                                  replaceTrackingLayers((layers) =>
+                                    layers.filter((candidate) => candidate.id !== layer.id)
+                                  );
+                                }
+                              }}
                             >
                               <span aria-hidden="true">×</span>
                             </button>
@@ -1611,6 +1847,12 @@ export default function Home() {
                         ))}
                     </div>
                   ))
+              )}
+              {totalTrackingCount > 0 && (
+                <p className="op-tracking-count">
+                  Showing {visibleTrackingCount} out of {totalTrackingCount} tracked item
+                  {totalTrackingCount === 1 ? "" : "s"}.
+                </p>
               )}
             </div>
             <p className="op-help-text">
@@ -1758,7 +2000,9 @@ export default function Home() {
                       />
                       <span>
                         {document.filename}
-                        <span className="op-document-meta">Direct PDF</span>
+                        <span className="op-document-meta">
+                          {document.source === "preloaded" ? "Preloaded manual" : "Direct PDF"}
+                        </span>
                       </span>
                     </label>
                   </div>
@@ -1768,6 +2012,19 @@ export default function Home() {
             <p className="op-help-text">
               Direct PDF attached: {selectedDocumentIds.length ? `${selectedDocumentIds.length} document(s)` : "none"}
             </p>
+          </div>
+
+          <div className="op-card">
+            <h2 className="op-card-title">Additional Notes</h2>
+            <textarea
+              id="additional-notes"
+              className="op-chat-input op-additional-notes"
+              value={additionalNotes}
+              onChange={(event) => setAdditionalNotes(event.target.value)}
+              rows={3}
+              placeholder="i.e. machine name, specs, etc."
+            />
+            <p className="op-help-text">These notes are included with every new message.</p>
           </div>
 
           <div className="op-card">
@@ -1794,15 +2051,20 @@ export default function Home() {
                 <button
                   type="button"
                   className="op-secondary-button"
-                  onClick={clearChatHistory}
-                  disabled={loading || (!chatMessages.length && !chatClearStatus)}
-                  title={
-                    loading
-                      ? "Wait for the current response to finish"
-                      : "Clear visible chat and backend conversation memory"
+                  onClick={() => void clearAllContext()}
+                  disabled={
+                    !chatMessages.length &&
+                    !queuedChatMessages.length &&
+                    !annotations.length &&
+                    !modelAnnotations.length &&
+                    !trackingLayers.length &&
+                    !activeTrackingJobs.length &&
+                    !additionalNotes &&
+                    !chatClearStatus
                   }
+                  title="Clear conversation, annotations, tracking, notes, and queued work while keeping the video, transcript, PDFs, and PDF selections"
                 >
-                  Clear Chat
+                  Clear All Context
                 </button>
                 <button
                   type="button"
@@ -1867,6 +2129,7 @@ export default function Home() {
                             ? ` · snapshot ${message.annotatedSnapshot ? "sent" : "not sent"}`
                             : ""}
                         </div>
+                        {message.cancelled && <div className="op-chat-stopped">Response stopped</div>}
                         {message.content}
                       </div>
                     )
@@ -1879,20 +2142,73 @@ export default function Home() {
               </div>
 
               <form className="op-chat-form" onSubmit={handleAsk}>
+                {queuedChatMessages.length > 0 && (
+                  <div className="op-chat-queue" aria-label="Queued messages">
+                    <div className="op-chat-queue-heading">
+                      <strong>Message queue</strong>
+                      <span>{queuedChatMessages.length}</span>
+                    </div>
+                    {queuedChatMessages.map((queuedMessage, index) => (
+                      <div className="op-chat-queue-item" key={queuedMessage.id}>
+                        <span className="op-chat-queue-number">{index + 1}</span>
+                        <textarea
+                          value={queuedMessage.text}
+                          rows={2}
+                          aria-label={`Edit queued message ${index + 1}`}
+                          onChange={(event) => {
+                            const text = event.target.value;
+                            replaceQueuedChatMessages((current) =>
+                              current.map((item) =>
+                                item.id === queuedMessage.id ? { ...item, text } : item
+                              )
+                            );
+                          }}
+                        />
+                        <button
+                          type="button"
+                          aria-label={`Remove queued message ${index + 1}`}
+                          title="Remove queued message"
+                          onClick={() =>
+                            replaceQueuedChatMessages((current) =>
+                              current.filter((item) => item.id !== queuedMessage.id)
+                            )
+                          }
+                        >
+                          <span aria-hidden="true">×</span>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="op-chat-input-row">
                   <textarea
                     className="op-chat-input"
                     value={question}
                     onChange={(event) => setQuestion(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        event.currentTarget.form?.requestSubmit();
+                      }
+                    }}
                     rows={2}
                     placeholder="Ask anything..."
                   />
+                  {loading && activeChatAbortRef.current && (
+                    <button
+                      type="button"
+                      className="op-stop-button"
+                      onClick={stopActiveResponse}
+                      disabled={stoppingResponse}
+                    >
+                      {stoppingResponse ? "Stopping..." : "Stop"}
+                    </button>
+                  )}
                   <button
                     type="submit"
                     className="op-send-button"
-                    aria-label={loading ? "Sending question" : "Send question"}
+                    aria-label={loading ? "Queue message" : "Send question"}
                     disabled={
-                      loading ||
                       ingesting ||
                       hasUnrevealedCompletedComparison ||
                       (!videoId || !videoMetadataLoaded)
