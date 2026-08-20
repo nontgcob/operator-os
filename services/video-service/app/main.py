@@ -1,16 +1,43 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
 import subprocess
+import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, Field
+
+try:
+    from .video_index import (
+        DEFAULT_SEGMENT_SECONDS,
+        add_frame_data,
+        build_timeline,
+        enrich_timeline,
+        load_timeline,
+        read_status as read_timeline_status,
+        search_timeline,
+        write_status as write_timeline_status,
+    )
+except ImportError:
+    from video_index import (
+        DEFAULT_SEGMENT_SECONDS,
+        add_frame_data,
+        build_timeline,
+        enrich_timeline,
+        load_timeline,
+        read_status as read_timeline_status,
+        search_timeline,
+        write_status as write_timeline_status,
+    )
 
 try:
     from services.common.env import load_env_file
@@ -26,6 +53,17 @@ BASE_DIR = Path(os.getenv("VIDEO_DATA_DIR", "data/video"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL", "base")
 _WHISPER_MODEL: Any | None = None
+_WHISPER_LOCK = threading.Lock()
+_TIMELINE_CANCEL_EVENTS: dict[str, threading.Event] = {}
+_TIMELINE_LOCK = threading.Lock()
+VIDEO_INDEX_MODEL = os.getenv("VIDEO_INDEX_MODEL", "google/gemini-3.7-flash")
+VIDEO_INDEX_SEGMENT_SECONDS = max(
+    1.0,
+    float(os.getenv("VIDEO_INDEX_SEGMENT_SECONDS", str(DEFAULT_SEGMENT_SECONDS))),
+)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", "http://localhost:3000")
+OPENROUTER_APP_TITLE = os.getenv("OPENROUTER_APP_TITLE", "OperatorOS")
 DEFAULT_YTDLP_FORMAT = "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best"
 DEFAULT_YTDLP_JS_RUNTIME = "deno:/usr/local/bin/deno"
 COOKIE_SETUP_HELP = (
@@ -37,6 +75,13 @@ YTDLP_TRUE_VALUES = {"1", "true", "yes", "on"}
 YTDLP_FALSE_VALUES = {"", "0", "false", "no", "off"}
 YTDLP_FETCH_PO_TOKEN_VALUES = {"auto", "always", "never"}
 MEDIA_CHUNK_SIZE = 1024 * 1024
+
+
+class VideoSearchRequest(BaseModel):
+    video_id: str = Field(pattern=r"^[A-Za-z0-9_-]+$")
+    query: str = Field(min_length=1, max_length=2000)
+    top_k: int = Field(default=4, ge=1, le=12)
+    include_images: bool = False
 
 
 def _env_bool_config(name: str, default: bool) -> bool:
@@ -158,8 +203,9 @@ def _transcribe_with_whisper(video_path: Path) -> list[dict[str, float | str]]:
     if not WHISPER_ENABLED:
         return []
     try:
-        model = _load_whisper_model()
-        result = model.transcribe(str(video_path), fp16=False)
+        with _WHISPER_LOCK:
+            model = _load_whisper_model()
+            result = model.transcribe(str(video_path), fp16=False)
     except Exception:
         return []
 
@@ -167,6 +213,27 @@ def _transcribe_with_whisper(video_path: Path) -> list[dict[str, float | str]]:
     if not isinstance(raw_segments, list):
         return []
     return _normalize_whisper_segments(raw_segments)
+
+
+def _transcribe_chat_audio(data: bytes, suffix: str) -> dict[str, Any]:
+    if not WHISPER_ENABLED:
+        raise RuntimeError("Whisper transcription is disabled")
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as audio_file:
+            audio_file.write(data)
+            temp_path = audio_file.name
+        with _WHISPER_LOCK:
+            model = _load_whisper_model()
+            result = model.transcribe(temp_path, fp16=False)
+    finally:
+        if temp_path:
+            Path(temp_path).unlink(missing_ok=True)
+    if not isinstance(result, dict):
+        return {"text": "", "segments": []}
+    raw_segments = result.get("segments", [])
+    segments = _normalize_whisper_segments(raw_segments if isinstance(raw_segments, list) else [])
+    return {"text": str(result.get("text", "")).strip(), "segments": segments}
 
 
 def _fallback_transcript_segments(video_path: Path) -> list[dict[str, float | str]]:
@@ -249,6 +316,66 @@ def _extract_frames(video_id: str, video_path: Path) -> list[dict[str, str | flo
         index.append({"timestamp": float(idx), "path": str(frame)})
     _frame_index_path(video_id).write_text(json.dumps(index), encoding="utf-8")
     return index
+
+
+def _load_transcript(video_id: str) -> list[dict[str, Any]]:
+    path = _transcript_path(video_id)
+    if not path.is_file():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, list) else []
+
+
+def _load_frame_index(video_id: str) -> list[dict[str, Any]]:
+    path = _frame_index_path(video_id)
+    if not path.is_file():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, list) else []
+
+
+def _prepare_timeline(video_id: str, transcript: list[dict[str, Any]], frames: list[dict[str, Any]]) -> None:
+    build_timeline(
+        video_id=video_id,
+        video_dir=_video_dir(video_id),
+        transcript=transcript,
+        frames=frames,
+        segment_seconds=VIDEO_INDEX_SEGMENT_SECONDS,
+    )
+
+
+def _run_timeline_enrichment(video_id: str, cancel_event: threading.Event) -> None:
+    try:
+        enrich_timeline(
+            video_dir=_video_dir(video_id),
+            api_key=OPENROUTER_API_KEY,
+            model=VIDEO_INDEX_MODEL,
+            http_referer=OPENROUTER_HTTP_REFERER,
+            app_title=OPENROUTER_APP_TITLE,
+            cancelled=cancel_event.is_set,
+        )
+    except Exception as exc:
+        write_timeline_status(
+            _video_dir(video_id),
+            state="partial",
+            progress=100,
+            error=str(exc),
+            warning="Visual indexing failed; transcript timeline search remains available.",
+        )
+    finally:
+        with _TIMELINE_LOCK:
+            if _TIMELINE_CANCEL_EVENTS.get(video_id) is cancel_event:
+                _TIMELINE_CANCEL_EVENTS.pop(video_id, None)
+
+
+def _schedule_timeline_enrichment(background_tasks: BackgroundTasks, video_id: str) -> None:
+    with _TIMELINE_LOCK:
+        previous = _TIMELINE_CANCEL_EVENTS.get(video_id)
+        if previous:
+            previous.set()
+        cancel_event = threading.Event()
+        _TIMELINE_CANCEL_EVENTS[video_id] = cancel_event
+    background_tasks.add_task(_run_timeline_enrichment, video_id, cancel_event)
 
 
 def _save_upload(video_id: str, file: UploadFile) -> Path:
@@ -703,6 +830,24 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.post("/speech/transcribe")
+async def speech_transcribe(file: UploadFile = File(...)) -> dict[str, Any]:
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Audio recording is empty")
+    if len(data) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Audio recording exceeds the 20 MB limit")
+    suffix = Path(file.filename or "recording.webm").suffix.lower()
+    if suffix not in {".webm", ".wav", ".mp3", ".m4a", ".ogg", ".mp4"}:
+        suffix = ".webm"
+    try:
+        return await asyncio.to_thread(_transcribe_chat_audio, data, suffix)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Speech transcription failed: {exc}") from exc
+
+
 @app.get("/diagnostics/ytdlp")
 async def ytdlp_diagnostics() -> dict[str, Any]:
     return _ytdlp_diagnostics()
@@ -711,6 +856,7 @@ async def ytdlp_diagnostics() -> dict[str, Any]:
 @app.post("/media/ingest")
 async def ingest_media(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(default=None),
     youtube_url: str | None = Form(default=None),
 ):
@@ -749,8 +895,11 @@ async def ingest_media(
         _cleanup_empty_video_dir(video_id)
         raise HTTPException(status_code=400, detail="No input media provided")
 
-    _extract_transcript(video_id, source_path)
-    _extract_frames(video_id, source_path)
+    transcript = _extract_transcript(video_id, source_path)
+    frames = _extract_frames(video_id, source_path)
+    _prepare_timeline(video_id, transcript, frames)
+    if frames:
+        _schedule_timeline_enrichment(background_tasks, video_id)
     metadata = _write_video_metadata(
         video_id,
         title=title,
@@ -900,3 +1049,96 @@ async def video_index(video_id: str):
     if not path.exists():
         raise HTTPException(status_code=404, detail="Frame index not found")
     return {"video_id": video_id, "frames": json.loads(path.read_text(encoding="utf-8"))}
+
+
+def _ensure_timeline(video_id: str) -> dict[str, Any]:
+    video_dir = _video_dir(video_id)
+    try:
+        return load_timeline(video_dir)
+    except FileNotFoundError:
+        if not _source_path(video_id).is_file():
+            raise HTTPException(status_code=404, detail="Video not found") from None
+        transcript = _load_transcript(video_id)
+        frames = _load_frame_index(video_id)
+        if not frames:
+            frames = _extract_frames(video_id, _source_path(video_id))
+        _prepare_timeline(video_id, transcript, frames)
+        return load_timeline(video_dir)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Timeline index is unavailable: {exc}") from exc
+
+
+@app.get("/video/timeline/status")
+async def video_timeline_status(video_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    existing = read_timeline_status(_video_dir(video_id))
+    if existing.get("state") == "not_started" and _source_path(video_id).is_file():
+        _ensure_timeline(video_id)
+        _schedule_timeline_enrichment(background_tasks, video_id)
+        existing = read_timeline_status(_video_dir(video_id))
+    return {"video_id": video_id, "model": VIDEO_INDEX_MODEL, **existing}
+
+
+@app.post("/video/timeline/rebuild")
+async def rebuild_video_timeline(video_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    if not _source_path(video_id).is_file():
+        raise HTTPException(status_code=404, detail="Video not found")
+    transcript = _load_transcript(video_id)
+    frames = _load_frame_index(video_id)
+    if not frames:
+        frames = _extract_frames(video_id, _source_path(video_id))
+    _prepare_timeline(video_id, transcript, frames)
+    _schedule_timeline_enrichment(background_tasks, video_id)
+    return {"video_id": video_id, "state": "prepared", "progress": 10, "model": VIDEO_INDEX_MODEL}
+
+
+@app.post("/video/timeline/cancel")
+async def cancel_video_timeline(video_id: str) -> dict[str, Any]:
+    with _TIMELINE_LOCK:
+        cancel_event = _TIMELINE_CANCEL_EVENTS.get(video_id)
+    if cancel_event:
+        cancel_event.set()
+        return {"video_id": video_id, "cancel_requested": True}
+    return {"video_id": video_id, "cancel_requested": False}
+
+
+@app.get("/video/timeline")
+async def video_timeline(video_id: str) -> dict[str, Any]:
+    payload = _ensure_timeline(video_id)
+    return {
+        "video_id": video_id,
+        "duration": payload.get("duration", 0),
+        "segment_seconds": payload.get("segment_seconds", VIDEO_INDEX_SEGMENT_SECONDS),
+        "overview": payload.get("overview", {}),
+        "segment_count": len(payload.get("segments", [])),
+    }
+
+
+@app.post("/video/search")
+async def video_search(payload: VideoSearchRequest) -> dict[str, Any]:
+    _ensure_timeline(payload.video_id)
+    moments = search_timeline(_video_dir(payload.video_id), payload.query, payload.top_k)
+    if payload.include_images:
+        moments = add_frame_data(_video_dir(payload.video_id), moments)
+    return {
+        "video_id": payload.video_id,
+        "query": payload.query,
+        "status": read_timeline_status(_video_dir(payload.video_id)),
+        "moments": moments,
+    }
+
+
+@app.get("/video/timeline/frame")
+async def video_timeline_frame(video_id: str, timestamp: float) -> FileResponse:
+    timeline = _ensure_timeline(video_id)
+    segments = timeline.get("segments", [])
+    if not segments:
+        raise HTTPException(status_code=404, detail="No indexed frames are available")
+    selected = min(
+        segments,
+        key=lambda segment: abs(float(segment.get("representative_timestamp", 0.0)) - timestamp),
+    )
+    frame_path = Path(str(selected.get("representative_frame", ""))).expanduser().resolve()
+    frames_root = (_video_dir(video_id) / "frames").resolve()
+    if frames_root not in frame_path.parents or not frame_path.is_file():
+        raise HTTPException(status_code=404, detail="Indexed frame was not found")
+    return FileResponse(frame_path, media_type="image/jpeg", filename=frame_path.name)

@@ -86,6 +86,61 @@ export interface DocumentIngestResponse {
   source?: "user" | "preloaded";
 }
 
+export type InteractionMode = "qna" | "training";
+
+export interface DocumentCitation {
+  citation_id: string;
+  document_id: string;
+  filename: string;
+  page?: number | null;
+  section?: string;
+  excerpt?: string;
+}
+
+export interface VideoMoment {
+  timestamp: number;
+  end_timestamp?: number | null;
+  label: string;
+  reason: string;
+  source: "video_index" | "transcript" | "tracking" | "annotation";
+  confidence: "high" | "medium" | "low";
+}
+
+export interface TrainingStep {
+  id: string;
+  title: string;
+  instruction: string;
+  expected_result?: string;
+  timestamp?: number | null;
+  end_timestamp?: number | null;
+  document_id?: string;
+  filename?: string;
+  page?: number | null;
+  section?: string;
+  components: string[];
+  warnings: string[];
+}
+
+export interface TrainingProcedure {
+  title: string;
+  objective: string;
+  prerequisites: string[];
+  materials: string[];
+  safety_warnings: string[];
+  manual_verified: boolean;
+  steps: TrainingStep[];
+}
+
+export interface TimelineStatusResponse {
+  video_id: string;
+  state: "not_started" | "prepared" | "analyzing" | "ready" | "partial" | "cancelled" | "error";
+  progress: number;
+  model?: string;
+  warning?: string | null;
+  error?: string | null;
+  segment_count?: number;
+}
+
 export interface DocumentStatusResponse {
   document_id: string;
   status: "processing" | "queryable" | "partial" | string;

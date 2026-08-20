@@ -341,6 +341,31 @@ def get_document_file_content_parts(document_ids: list[str]) -> list[dict[str, A
     return parts
 
 
+def get_document_catalog(document_ids: list[str]) -> list[dict[str, Any]]:
+    catalog: list[dict[str, Any]] = []
+    for document_id in document_ids:
+        document = get_document_record(document_id)
+        original_path = _find_original_path(document_id)
+        if document is None or original_path is None:
+            raise KeyError(document_id)
+        catalog.append(
+            {
+                "document_id": document_id,
+                "filename": str(document.get("name") or original_path.name),
+                "content_type": str(document.get("content_type") or "application/pdf"),
+            }
+        )
+    return catalog
+
+
+def get_document_file_path(document_id: str) -> tuple[Path, dict[str, Any]]:
+    document = get_document_record(document_id)
+    original_path = _find_original_path(document_id)
+    if document is None or original_path is None:
+        raise KeyError(document_id)
+    return original_path, document
+
+
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 80) -> list[str]:
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")

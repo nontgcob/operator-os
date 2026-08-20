@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 try:
@@ -23,6 +24,8 @@ try:
     from .prompts import build_prompt
     from .rag.retrieval import (
         get_document_file_content_parts,
+        get_document_catalog,
+        get_document_file_path,
         get_document_status,
         ingest_document_bytes,
         reprocess_document,
@@ -35,6 +38,8 @@ except ImportError:
     from prompts import build_prompt
     from rag.retrieval import (
         get_document_file_content_parts,
+        get_document_catalog,
+        get_document_file_path,
         get_document_status,
         ingest_document_bytes,
         reprocess_document,
@@ -73,6 +78,9 @@ class InferRequest(BaseModel):
     conversation: list[dict[str, str]] = Field(default_factory=list)
     model: str = DEFAULT_MODEL
     additional_notes: str = ""
+    mode: str = Field(default="qna", pattern=r"^(qna|training)$")
+    video_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    video_overview: dict[str, Any] = Field(default_factory=dict)
 
 
 def _build_prompt(payload: InferRequest) -> str:
@@ -80,11 +88,15 @@ def _build_prompt(payload: InferRequest) -> str:
         f"[{segment.start:.2f}-{segment.end:.2f}] {segment.text}"
         for segment in payload.transcript_segments
     ) or "No transcript."
+    try:
+        catalog = get_document_catalog(payload.document_ids)
+    except KeyError:
+        catalog = []
     docs = (
-        "The selected PDF manual(s) are attached to the user message as native PDF file inputs. "
-        "Read those attached files directly and ground document-specific claims in them. "
-        "If the PDFs do not contain enough evidence, say so plainly."
-        if payload.document_ids
+        "The selected PDF manual(s) are attached as native PDF inputs. Use the exact document IDs and filenames "
+        "below in every document citation. Cite the most precise page and section supported by the PDF parser.\n"
+        + json.dumps(catalog, ensure_ascii=False)
+        if catalog
         else "No document PDFs are attached."
     )
     return build_prompt(
@@ -95,6 +107,9 @@ def _build_prompt(payload: InferRequest) -> str:
         model_family=model_family_for(payload.model),
         video_title=payload.video_title,
         additional_notes=payload.additional_notes,
+        mode=payload.mode,
+        video_evidence=payload.video_evidence,
+        video_overview=payload.video_overview,
     )
 
 
@@ -147,6 +162,20 @@ async def document_status(document_id: str) -> dict[str, Any]:
         return get_document_status(document_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Document not found") from exc
+
+
+@app.get("/documents/{document_id}/file")
+async def document_file(document_id: str) -> FileResponse:
+    try:
+        path, document = get_document_file_path(document_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Document not found") from exc
+    return FileResponse(
+        path,
+        media_type=str(document.get("content_type") or "application/pdf"),
+        filename=str(document.get("name") or path.name),
+        content_disposition_type="inline",
+    )
 
 
 @app.post("/documents/{document_id}/reprocess")
@@ -211,6 +240,25 @@ async def infer(payload: InferRequest) -> StreamingResponse:
             }
         )
         user_content.extend(document_parts)
+    if payload.video_evidence:
+        user_content.append(
+            {
+                "type": "text",
+                "text": "Retrieved moments from the full-video timeline follow. Treat timestamps as source evidence:",
+            }
+        )
+        for evidence_index, evidence in enumerate(payload.video_evidence[:12]):
+            frame_data_url = evidence.get("frame_data_url")
+            visible_evidence = {key: value for key, value in evidence.items() if key != "frame_data_url"}
+            user_content.append(
+                {"type": "text", "text": json.dumps(visible_evidence, ensure_ascii=False)}
+            )
+            if (
+                evidence_index < 4
+                and isinstance(frame_data_url, str)
+                and frame_data_url.startswith("data:image/")
+            ):
+                user_content.append({"type": "image_url", "image_url": {"url": frame_data_url}})
     user_content.append({"type": "text", "text": payload.question})
     messages.append({"role": "user", "content": user_content})
 
@@ -218,12 +266,13 @@ async def infer(payload: InferRequest) -> StreamingResponse:
         "model": payload.model,
         "messages": messages,
         "stream": True,
+        "response_format": {"type": "json_object"},
     }
     plugins = _pdf_plugins() if document_parts else None
     if plugins:
         request_body["plugins"] = plugins
     if model_supports_reasoning(payload.model):
-        request_body["reasoning"] = {"effort": "low"}
+        request_body["reasoning"] = {"effort": "medium" if payload.mode == "training" else "low"}
 
     async def stream() -> Any:
         try:

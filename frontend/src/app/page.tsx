@@ -5,7 +5,10 @@ import type { FormEvent } from "react";
 import { AnnotationControls } from "@/components/AnnotationControls";
 import { AnnotationOverlay } from "@/components/AnnotationOverlay";
 import { ComparisonTurnCard } from "@/components/ComparisonTurnCard";
+import { DocumentCitations } from "@/components/DocumentCitations";
+import { TrainingProcedureCard } from "@/components/TrainingProcedureCard";
 import { TrackingOverlayCanvas } from "@/components/TrackingOverlayCanvas";
+import { VideoMoments } from "@/components/VideoMoments";
 import {
   comparisonExportLines,
   createComparisonTurn,
@@ -20,6 +23,7 @@ import { colorizeTrackingTargets, createTrackingLayers } from "@/lib/trackingLay
 import {
   askComparison,
   askQuestion,
+  cancelTimeline,
   cancelTracking,
   clearChatSession,
   exportTrackingVideo,
@@ -28,10 +32,13 @@ import {
   getPreloadedDocuments,
   getTrackingOverlays,
   getDocumentStatus,
+  getTimelineStatus,
   getTranscriptWindow,
   getVideoMetadata,
   ingestYoutubeUrl,
+  rebuildTimeline,
   startTracking,
+  transcribeSpeech,
   uploadDocument,
   uploadMedia,
 } from "@/lib/api";
@@ -41,11 +48,16 @@ import type {
   AnnotationType,
   AnswerLabel,
   ComparisonTurn,
+  DocumentCitation,
+  InteractionMode,
+  TimelineStatusResponse,
+  TrainingProcedure,
   TrackingLayer,
   TrackingOverlay,
   TrackingTarget,
   TrackingTargetProgress,
   TranscriptWindowResponse,
+  VideoMoment,
 } from "@/lib/types";
 
 interface ChatMessage {
@@ -60,6 +72,9 @@ interface ChatMessage {
   comparison?: ComparisonTurn;
   comparisonQuestion?: string;
   cancelled?: boolean;
+  citations?: DocumentCitation[];
+  videoMoments?: VideoMoment[];
+  trainingProcedure?: TrainingProcedure | null;
 }
 
 interface UploadedDocument {
@@ -80,6 +95,7 @@ interface QueuedChatMessage {
   annotations: Annotation[];
   includeAnnotatedSnapshot: boolean;
   additionalNotes: string;
+  mode: InteractionMode;
 }
 
 interface ActiveTrackingJob {
@@ -92,6 +108,11 @@ interface ActiveTrackingJob {
 }
 
 const RAGVLM_MODELS = [
+  {
+    family: "Gemini",
+    label: "Gemini 3.7 Flash",
+    value: "google/gemini-3.7-flash",
+  },
   {
     family: "Gemini",
     label: "Gemini 3.1 Pro Preview",
@@ -124,7 +145,7 @@ const RAGVLM_MODELS = [
   },
 ];
 
-const DEFAULT_RAGVLM_MODEL = "google/gemini-3.1-pro-preview";
+const DEFAULT_RAGVLM_MODEL = "google/gemini-3.7-flash";
 type Theme = "light" | "dark";
 
 function ThemeIcon({ theme }: { theme: Theme }) {
@@ -145,6 +166,14 @@ function formatTimestamp(seconds: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const remainingSeconds = totalSeconds % 60;
   return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
+}
+
+function formatAnswerText(content: string) {
+  return content.split(/(\*\*[^*]+\*\*)/g).map((part, index) =>
+    part.startsWith("**") && part.endsWith("**")
+      ? <strong key={`${index}-${part}`}>{part.slice(2, -2)}</strong>
+      : part
+  );
 }
 
 function shortTrackingLabel(prompt: string): string {
@@ -282,6 +311,11 @@ export default function Home() {
   const [question, setQuestion] = useState("");
   const [additionalNotes, setAdditionalNotes] = useState("");
   const [selectedModel, setSelectedModel] = useState(DEFAULT_RAGVLM_MODEL);
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>("qna");
+  const [timelineStatus, setTimelineStatus] = useState<TimelineStatusResponse | null>(null);
+  const [timelineError, setTimelineError] = useState("");
+  const [timelineBusy, setTimelineBusy] = useState(false);
+  const [timelineRefresh, setTimelineRefresh] = useState(0);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [documents, setDocuments] = useState<UploadedDocument[]>([]);
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
@@ -321,6 +355,10 @@ export default function Home() {
   const [drawColor, setDrawColor] = useState("#ef4444");
   const [textAnnotation, setTextAnnotation] = useState("");
   const [showTranscript, setShowTranscript] = useState(false);
+  const [recordingSpeech, setRecordingSpeech] = useState(false);
+  const [transcribingSpeech, setTranscribingSpeech] = useState(false);
+  const [speechError, setSpeechError] = useState("");
+  const [speakingMessageId, setSpeakingMessageId] = useState("");
   const localFileInputRef = useRef<HTMLInputElement | null>(null);
   const trackingEventSourcesRef = useRef<Map<string, EventSource>>(new Map());
   const activeChatAbortRef = useRef<AbortController | null>(null);
@@ -329,6 +367,9 @@ export default function Home() {
   const trackingLayersRef = useRef<TrackingLayer[]>([]);
   const activeTrackingJobsRef = useRef<ActiveTrackingJob[]>([]);
   const contextGenerationRef = useRef(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const speechChunksRef = useRef<Blob[]>([]);
+  const speechStreamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
     const savedTheme = window.localStorage.getItem("operatoros-theme");
@@ -381,6 +422,39 @@ export default function Home() {
     };
   }, [videoId]);
 
+  useEffect(() => {
+    if (!videoId) {
+      setTimelineStatus(null);
+      setTimelineError("");
+      return;
+    }
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const status = await getTimelineStatus(videoId);
+        if (disposed) return;
+        setTimelineStatus(status);
+        setTimelineError("");
+        if (["prepared", "analyzing", "not_started"].includes(status.state)) {
+          timer = setTimeout(() => void poll(), 1500);
+        }
+      } catch (error) {
+        if (!disposed) setTimelineError(`Video understanding unavailable: ${errorMessage(error)}`);
+      }
+    };
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [videoId, timelineRefresh]);
+
+  useEffect(() => () => {
+    speechStreamRef.current?.getTracks().forEach((track) => track.stop());
+    window.speechSynthesis?.cancel();
+  }, []);
+
   function toggleTheme() {
     setTheme((current) => {
       const next = current === "light" ? "dark" : "light";
@@ -388,6 +462,98 @@ export default function Home() {
       window.localStorage.setItem("operatoros-theme", next);
       return next;
     });
+  }
+
+  async function jumpToVideoMoment(sourceTimestamp: number) {
+    const video = videoRef.current;
+    if (!video) return;
+    const playerTimestamp = Math.max(0, sourceTimestamp - videoTimeOffset);
+    video.pause();
+    video.currentTime = playerTimestamp;
+    setTimestamp(playerTimestamp);
+    setIsPaused(true);
+    video.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (videoId) await loadTranscriptWindow(videoId, sourceTimestamp);
+  }
+
+  async function handleTimelineRebuild() {
+    if (!videoId || timelineBusy) return;
+    setTimelineBusy(true);
+    setTimelineError("");
+    try {
+      setTimelineStatus(await rebuildTimeline(videoId));
+      setTimelineRefresh((value) => value + 1);
+    } catch (error) {
+      setTimelineError(errorMessage(error));
+    } finally {
+      setTimelineBusy(false);
+    }
+  }
+
+  async function handleTimelineCancel() {
+    if (!videoId || timelineBusy || !window.confirm("Cancel background video understanding?")) return;
+    setTimelineBusy(true);
+    try {
+      await cancelTimeline(videoId);
+      setTimelineStatus((current) => current ? { ...current, state: "cancelled" } : current);
+    } catch (error) {
+      setTimelineError(errorMessage(error));
+    } finally {
+      setTimelineBusy(false);
+    }
+  }
+
+  function speakMessage(message: ChatMessage) {
+    if (!("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    if (speakingMessageId === message.id) {
+      setSpeakingMessageId("");
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(message.content);
+    utterance.onend = () => setSpeakingMessageId("");
+    utterance.onerror = () => setSpeakingMessageId("");
+    setSpeakingMessageId(message.id);
+    window.speechSynthesis.speak(utterance);
+  }
+
+  async function startSpeechRecording() {
+    if (recordingSpeech || transcribingSpeech) return;
+    setSpeechError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      speechStreamRef.current = stream;
+      speechChunksRef.current = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size) speechChunksRef.current.push(event.data);
+      };
+      recorder.onstop = () => {
+        const mimeType = recorder.mimeType || "audio/webm";
+        const blob = new Blob(speechChunksRef.current, { type: mimeType });
+        speechStreamRef.current?.getTracks().forEach((track) => track.stop());
+        speechStreamRef.current = null;
+        mediaRecorderRef.current = null;
+        setRecordingSpeech(false);
+        if (!blob.size) return;
+        setTranscribingSpeech(true);
+        void transcribeSpeech(blob)
+          .then((text) => {
+            if (text) setQuestion((current) => `${current}${current.trim() ? " " : ""}${text}`);
+          })
+          .catch((error) => setSpeechError(errorMessage(error)))
+          .finally(() => setTranscribingSpeech(false));
+      };
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setRecordingSpeech(true);
+    } catch (error) {
+      setSpeechError(`Microphone unavailable: ${errorMessage(error)}`);
+    }
+  }
+
+  function stopSpeechRecording() {
+    if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop();
   }
 
   function closeTrackingEventSources() {
@@ -432,6 +598,8 @@ export default function Home() {
     processingChatRef.current = false;
     replaceQueuedChatMessages(() => []);
     closeTrackingEventSources();
+    window.speechSynthesis?.cancel();
+    setSpeakingMessageId("");
     if (videoUrl && videoUrl.startsWith("blob:")) {
       URL.revokeObjectURL(videoUrl);
     }
@@ -449,6 +617,8 @@ export default function Home() {
     setVideoTimeOffset(0);
     setTranscriptWindow(null);
     setTranscriptError("");
+    setTimelineStatus(null);
+    setTimelineError("");
     setAnnotations([]);
     setModelAnnotations([]);
     setAnnotationUndoStack([]);
@@ -999,9 +1169,10 @@ export default function Home() {
       documentNames: documents
         .filter((document) => selectedDocumentIds.includes(document.id))
         .map((document) => document.filename),
-      annotations: annotations.map((annotation) => ({ ...annotation })),
+      annotations: [...annotations, ...modelAnnotations].map((annotation) => ({ ...annotation })),
       includeAnnotatedSnapshot: sendAnnotatedSnapshot,
       additionalNotes: additionalNotes.trim(),
+      mode: interactionMode,
     };
     setQuestion("");
     setChatClearStatus("");
@@ -1062,6 +1233,13 @@ export default function Home() {
         document_ids: request.documentIds,
         model: request.model,
         additional_notes: request.additionalNotes,
+        mode: request.mode,
+        tracking_context: trackingLayersRef.current.flatMap((layer) => {
+          const timestamps = layer.overlays.map((overlay) => overlay.timestamp);
+          return timestamps.length
+            ? [{ label: layer.label, start: Math.min(...timestamps), end: Math.max(...timestamps) }]
+            : [];
+        }),
       }, abortController.signal);
       if (!response.ok) {
         throw new Error(await response.text());
@@ -1093,6 +1271,9 @@ export default function Home() {
             ? {
                 ...message,
                 content: parsed.answer || rawAssistantText || "No answer returned.",
+                citations: parsed.citations,
+                videoMoments: parsed.videoMoments,
+                trainingProcedure: parsed.trainingProcedure,
               }
             : message
         )
@@ -1985,6 +2166,49 @@ export default function Home() {
                 {trackingError}
               </p>
             )}
+            {videoId && (
+              <div className="op-timeline-status" aria-label="Whole-video understanding status">
+                <div className="op-timeline-status-heading">
+                  <div>
+                    <strong>Whole-video understanding</strong>
+                    <small>
+                      {timelineStatus?.state === "ready"
+                        ? "Ready · sampled every 2 seconds"
+                        : timelineStatus?.state === "partial"
+                          ? "Partially ready · transcript search available"
+                          : timelineStatus?.state === "cancelled"
+                            ? "Cancelled"
+                            : timelineStatus?.state === "error"
+                              ? "Needs attention"
+                              : "Analyzing 2-second snapshots"}
+                    </small>
+                  </div>
+                  {timelineStatus && ["prepared", "analyzing", "not_started"].includes(timelineStatus.state) ? (
+                    <button type="button" onClick={() => void handleTimelineCancel()} disabled={timelineBusy}>
+                      Cancel
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => void handleTimelineRebuild()} disabled={timelineBusy}>
+                      {timelineBusy ? "Starting..." : "Rebuild"}
+                    </button>
+                  )}
+                </div>
+                <div
+                  className="op-timeline-progress"
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={timelineStatus?.progress ?? 0}
+                >
+                  <span style={{ width: `${Math.max(0, Math.min(100, timelineStatus?.progress ?? 0))}%` }} />
+                </div>
+                {(timelineError || timelineStatus?.error || timelineStatus?.warning) && (
+                  <p className={timelineError || timelineStatus?.error ? "op-error-text" : "op-help-text"}>
+                    {timelineError || timelineStatus?.error || timelineStatus?.warning}
+                  </p>
+                )}
+              </div>
+            )}
             {showTranscript && (
               <div className="op-transcript-panel">
                 {transcriptWindow?.source && (
@@ -2155,6 +2379,32 @@ export default function Home() {
                 </button>
               </div>
             </div>
+            <div className="op-mode-switch" role="group" aria-label="Conversation mode">
+              <button
+                type="button"
+                className={interactionMode === "qna" ? "active" : ""}
+                onClick={() => setInteractionMode("qna")}
+              >
+                Q&amp;A
+              </button>
+              <button
+                type="button"
+                className={interactionMode === "training" ? "active" : ""}
+                onClick={() => setInteractionMode("training")}
+              >
+                Training
+              </button>
+              <span>
+                {interactionMode === "training"
+                  ? "Build a guided, source-linked procedure from the video and selected manuals."
+                  : "Ask about any moment in the full video or selected manuals."}
+              </span>
+            </div>
+            {interactionMode === "training" && selectedDocumentIds.length === 0 && (
+              <p className="op-training-source-warning">
+                No manual is selected. Training guidance can use the video, but it will not be marked manual verified.
+              </p>
+            )}
             {chatClearStatus && (
               <p role="status" className="op-status-text" style={{ marginTop: -4, marginBottom: 10 }}>
                 {chatClearStatus}
@@ -2193,7 +2443,30 @@ export default function Home() {
                             : ""}
                         </div>
                         {message.cancelled && <div className="op-chat-stopped">Response stopped</div>}
-                        {message.content}
+                        <div className="op-chat-content">{formatAnswerText(message.content)}</div>
+                        {message.role === "assistant" && !message.error && message.content !== "Thinking..." && (
+                          <button
+                            type="button"
+                            className="op-speak-button"
+                            onClick={() => speakMessage(message)}
+                            aria-label={speakingMessageId === message.id ? "Stop reading response" : "Read response aloud"}
+                          >
+                            {speakingMessageId === message.id ? "Stop audio" : "Read aloud"}
+                          </button>
+                        )}
+                        {message.role === "assistant" && message.videoMoments ? (
+                          <VideoMoments moments={message.videoMoments} onSeek={(value) => void jumpToVideoMoment(value)} />
+                        ) : null}
+                        {message.role === "assistant" && message.citations ? (
+                          <DocumentCitations citations={message.citations} />
+                        ) : null}
+                        {message.role === "assistant" && message.trainingProcedure?.steps.length ? (
+                          <TrainingProcedureCard
+                            procedure={message.trainingProcedure}
+                            storageKey={`operatoros-training:${videoId}:${message.id}`}
+                            onSeek={(value) => void jumpToVideoMoment(value)}
+                          />
+                        ) : null}
                       </div>
                     )
                   )
@@ -2255,8 +2528,18 @@ export default function Home() {
                       }
                     }}
                     rows={2}
-                    placeholder="Ask anything..."
+                    placeholder={interactionMode === "training" ? "What procedure should I learn?" : "Ask anything about the full video..."}
                   />
+                  <button
+                    type="button"
+                    className={`op-microphone-button ${recordingSpeech ? "recording" : ""}`}
+                    onClick={recordingSpeech ? stopSpeechRecording : () => void startSpeechRecording()}
+                    disabled={transcribingSpeech}
+                    aria-label={recordingSpeech ? "Stop voice recording" : "Dictate question"}
+                    title={recordingSpeech ? "Stop recording" : "Dictate with microphone"}
+                  >
+                    {transcribingSpeech ? "…" : recordingSpeech ? "■" : "🎙"}
+                  </button>
                   {loading && activeChatAbortRef.current && (
                     <button
                       type="button"
@@ -2287,6 +2570,7 @@ export default function Home() {
                     </svg>
                   </button>
                 </div>
+                {speechError && <p className="op-error-text">{speechError}</p>}
               </form>
             </div>
           </div>

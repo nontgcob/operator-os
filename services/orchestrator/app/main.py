@@ -215,6 +215,8 @@ class ChatStreamRequest(BaseModel):
     document_ids: list[str] = Field(default_factory=list)
     model: str | None = None
     additional_notes: str = ""
+    mode: str = Field(default="qna", pattern=r"^(qna|training)$")
+    tracking_context: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class DocumentRetrieveRequest(BaseModel):
@@ -237,6 +239,7 @@ class ComparisonStreamRequest(BaseModel):
     model: str | None = None
     retry_of: str | None = None
     additional_notes: str = ""
+    mode: str = Field(default="qna", pattern=r"^(qna|training)$")
 
 
 class ComparisonRevealRequest(BaseModel):
@@ -413,6 +416,17 @@ async def transcript_window(video_id: str, timestamp: float, before: float = 30,
     return response.json()
 
 
+@app.post("/speech/transcribe")
+async def speech_transcribe(file: UploadFile = File(...)) -> Any:
+    data = await file.read()
+    payload = {"file": (file.filename or "recording.webm", data, file.content_type)}
+    async with httpx.AsyncClient(timeout=300) as client:
+        response = await client.post(f"{VIDEO_SERVICE_URL}/speech/transcribe", files=payload)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    return response.json()
+
+
 @app.get("/media/metadata")
 async def media_metadata(video_id: str) -> Any:
     async with httpx.AsyncClient(timeout=30) as client:
@@ -469,6 +483,72 @@ async def preloaded_documents() -> Any:
     return response.json()
 
 
+async def _video_context(video_id: str, question: str, mode: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    top_k = 10 if mode == "training" else 4
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            search_response, timeline_response = await asyncio.gather(
+                client.post(
+                    f"{VIDEO_SERVICE_URL}/video/search",
+                    json={
+                        "video_id": video_id,
+                        "query": question,
+                        "top_k": top_k,
+                        "include_images": True,
+                    },
+                ),
+                client.get(f"{VIDEO_SERVICE_URL}/video/timeline", params={"video_id": video_id}),
+            )
+        moments = search_response.json().get("moments", []) if search_response.status_code < 400 else []
+        overview = timeline_response.json().get("overview", {}) if timeline_response.status_code < 400 else {}
+        return (
+            moments if isinstance(moments, list) else [],
+            overview if isinstance(overview, dict) else {},
+        )
+    except (httpx.HTTPError, ValueError, json.JSONDecodeError):
+        # Whole-video evidence is additive. Current-frame chat must remain available if indexing is not ready.
+        return [], {}
+
+
+@app.get("/video/timeline/status")
+async def timeline_status(video_id: str) -> Any:
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(f"{VIDEO_SERVICE_URL}/video/timeline/status", params={"video_id": video_id})
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    return response.json()
+
+
+@app.post("/video/timeline/rebuild")
+async def timeline_rebuild(video_id: str) -> Any:
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(f"{VIDEO_SERVICE_URL}/video/timeline/rebuild", params={"video_id": video_id})
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    return response.json()
+
+
+@app.post("/video/timeline/cancel")
+async def timeline_cancel(video_id: str) -> Any:
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(f"{VIDEO_SERVICE_URL}/video/timeline/cancel", params={"video_id": video_id})
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    return response.json()
+
+
+@app.get("/video/timeline/frame")
+async def timeline_frame(video_id: str, timestamp: float) -> Response:
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(
+            f"{VIDEO_SERVICE_URL}/video/timeline/frame",
+            params={"video_id": video_id, "timestamp": timestamp},
+        )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    return Response(content=response.content, media_type=response.headers.get("content-type", "image/jpeg"))
+
+
 async def _get_pipeline_status(url: str) -> dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -504,6 +584,22 @@ async def document_status(document_id: str) -> dict[str, Any]:
             "direct_pdf_vlm": {**document_status_payload, "status": normalized_status},
         },
     }
+
+
+@app.get("/documents/{document_id}/file")
+async def document_file(document_id: str) -> Response:
+    async with httpx.AsyncClient(timeout=120) as client:
+        response = await client.get(f"{RAGVLM_SERVICE_URL}/documents/{document_id}/file")
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    headers = {}
+    if disposition := response.headers.get("content-disposition"):
+        headers["Content-Disposition"] = disposition
+    return Response(
+        content=response.content,
+        media_type=response.headers.get("content-type", "application/pdf"),
+        headers=headers,
+    )
 
 
 @app.post("/documents/{document_id}/reprocess")
@@ -804,6 +900,20 @@ async def reveal_comparison(comparison_id: str, payload: ComparisonRevealRequest
 @app.post("/chat/stream")
 async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
     exchange_id = str(uuid4())
+    video_evidence, video_overview = await _video_context(payload.video_id, payload.question, payload.mode)
+    if payload.tracking_context:
+        video_evidence.extend(
+            {
+                "segment_id": f"tracking-{index + 1}",
+                "start": item.get("start"),
+                "end": item.get("end"),
+                "representative_timestamp": item.get("start"),
+                "summary": f"Tracked item: {item.get('label', 'Tracked object')}",
+                "objects": [item.get("label", "Tracked object")],
+                "source": "tracking",
+            }
+            for index, item in enumerate(payload.tracking_context)
+        )
     chat_context = {
         "video_id": payload.video_id,
         "video_title": payload.video_title,
@@ -817,6 +927,8 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
         "annotated_frame_data_url": _data_url_summary(payload.annotated_frame_data_url),
         "annotated_snapshot_sent": payload.annotated_frame_data_url is not None,
         "additional_notes": payload.additional_notes,
+        "mode": payload.mode,
+        "video_evidence_count": len(video_evidence),
     }
     _record_chat_message(
         session_id=payload.session_id,
@@ -837,6 +949,9 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
         "document_ids": payload.document_ids,
         "conversation": _load_conversation(payload.session_id),
         "additional_notes": payload.additional_notes,
+        "mode": payload.mode,
+        "video_evidence": video_evidence,
+        "video_overview": video_overview,
     }
     if payload.model:
         request_body["model"] = payload.model

@@ -71,6 +71,27 @@ def test_transcript_window_filters_segments(tmp_path: Path) -> None:
     assert payload["warning"] is None
 
 
+def test_chat_speech_transcription_endpoint(monkeypatch) -> None:
+    module = _load_video_module()
+    monkeypatch.setattr(
+        module,
+        "_transcribe_chat_audio",
+        lambda data, suffix: {
+            "text": "show me the emergency stop",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "show me the emergency stop"}],
+        },
+    )
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/speech/transcribe",
+        files={"file": ("recording.webm", b"audio-bytes", "audio/webm")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "show me the emergency stop"
+
+
 def test_transcript_window_reports_fallback_source(tmp_path: Path) -> None:
     module = _load_video_module()
     module.BASE_DIR = tmp_path

@@ -58,6 +58,79 @@ describe("parseModelResponse", () => {
       },
     ]);
   });
+
+  it("parses pinpoint citations, video moments, and a training procedure", () => {
+    const parsed = parseModelResponse(JSON.stringify({
+      answer: "Follow the shutdown steps.",
+      citations: [{
+        citation_id: "c1",
+        document_id: "manual-1",
+        filename: "manual.pdf",
+        page: 12,
+        section: "Shutdown",
+        excerpt: "Press stop before disconnecting power.",
+      }],
+      video_moments: [{
+        timestamp: 8,
+        label: "Stop button",
+        reason: "The operator presses stop.",
+        source: "video_index",
+        confidence: "high",
+      }],
+      training_procedure: {
+        title: "Safe shutdown",
+        objective: "Power down safely.",
+        prerequisites: ["Wear gloves"],
+        materials: [],
+        safety_warnings: ["Do not open energized panels"],
+        manual_verified: true,
+        steps: [{
+          id: "step-1",
+          title: "Press stop",
+          instruction: "Press the stop button.",
+          timestamp: 8,
+          document_id: "manual-1",
+          filename: "manual.pdf",
+          page: 12,
+          components: ["stop button"],
+          warnings: [],
+        }],
+      },
+    }));
+
+    expect(parsed.citations[0]).toMatchObject({ filename: "manual.pdf", page: 12 });
+    expect(parsed.videoMoments[0]).toMatchObject({ timestamp: 8, label: "Stop button" });
+    expect(parsed.trainingProcedure?.steps[0]).toMatchObject({ id: "step-1", timestamp: 8 });
+  });
+
+  it("repairs a stray bare token without exposing raw JSON", () => {
+    const parsed = parseModelResponse(
+      '```json{"answer":"Rear view found.","annotations":[],"tracking_prompt":"",' +
+      '"tracking_annotations":[],"tracking_targets":[],"citations":[],"video_moments":[],' +
+      '"training_procedure":{"title":"Rear inspection","objective":"Inspect rear",' +
+      '"prerequisites":[],"materials":[],"safety_warnings":[],"manual_verified":true,Box ' +
+      '"steps":[{"id":"step-1","title":"Inspect","instruction":"Check the rear.",' +
+      '"components":[],"warnings":[]}]}}```'
+    );
+
+    expect(parsed.answer).toBe("Rear view found.");
+    expect(parsed.trainingProcedure?.title).toBe("Rear inspection");
+  });
+
+  it("normalizes Gemini coordinate arrays into drawable annotations", () => {
+    const parsed = parseModelResponse(JSON.stringify({
+      answer: "Marked.",
+      annotations: [
+        { type: "rect", coordinates: [100, 200, 350, 500], color: "#3b82f6" },
+        { type: "arrow", coordinates: [10, 20, 30, 40], color: "#3b82f6" },
+      ],
+    }));
+
+    expect(parsed.annotations).toEqual([
+      expect.objectContaining({ type: "rect", x: 100, y: 200, width: 250, height: 300 }),
+      expect.objectContaining({ type: "arrow", x1: 10, y1: 20, x2: 30, y2: 40 }),
+    ]);
+  });
 });
 
 describe("partialAnswerFromModelResponse", () => {

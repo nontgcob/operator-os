@@ -50,6 +50,28 @@ def test_reprocess_keeps_stored_document_queryable(tmp_path: Path) -> None:
     assert second["status"] == "queryable"
 
 
+def test_training_prompt_with_selected_pdf_includes_exact_citation_catalog(tmp_path: Path) -> None:
+    configure_document_dir(tmp_path)
+    ingest_document_bytes(
+        b"%PDF-1.4\nfixture",
+        filename="machine-manual.pdf",
+        content_type="application/pdf",
+        document_id="manual-training",
+    )
+    payload = ragvlm_main.InferRequest(
+        question="Teach me the shutdown procedure.",
+        frame_data_url="data:image/jpeg;base64,/9j/2Q==",
+        document_ids=["manual-training"],
+        mode="training",
+    )
+
+    prompt = ragvlm_main._build_prompt(payload)
+
+    assert '"document_id": "manual-training"' in prompt
+    assert '"filename": "machine-manual.pdf"' in prompt
+    assert "Interaction mode:\ntraining" in prompt
+
+
 def test_removed_text_artifact_and_text_rag_endpoints_return_410(tmp_path: Path) -> None:
     configure_document_dir(tmp_path)
     client = TestClient(ragvlm_main.app)

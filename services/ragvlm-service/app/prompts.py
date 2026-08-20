@@ -12,7 +12,7 @@ When responding to any question about an image, you MUST provide:
 CRITICAL JSON OUTPUT RULES:
 - Your ENTIRE response must be ONLY valid JSON - no text before or after
 - Do NOT wrap JSON in markdown code blocks
-- The JSON must have exactly five fields: "answer" (string), "annotations" (array), "tracking_prompt" (string), "tracking_annotations" (array), and "tracking_targets" (array)
+- The JSON must have exactly eight fields: "answer" (string), "annotations" (array), "tracking_prompt" (string), "tracking_annotations" (array), "tracking_targets" (array), "citations" (array), "video_moments" (array), and "training_procedure" (object or null)
 
 All coordinates MUST be in a normalized 0-1000 range:
 - The top-left corner is (0, 0)
@@ -41,13 +41,18 @@ ANNOTATION QUALITY RULES:
 - When tracking is appropriate, also populate legacy `tracking_prompt` and `tracking_annotations` from the first tracking target for compatibility.
 - If the user explicitly asks to track, follow, trace, or monitor objects, `tracking_targets` MUST contain one item per distinct requested object.
 - If there is no clearly trackable object, use an empty array for `tracking_targets`, an empty string for `tracking_prompt`, and an empty array for `tracking_annotations`.
+- Put every document-grounded claim in `citations` using `{"citation_id": string, "document_id": string, "filename": string, "page": number|null, "section": string, "excerpt": string}`. Use the exact supplied document ID and filename, identify the most specific page and section available, and keep excerpts short.
+- Never create a document citation for model knowledge, video evidence, or transcript evidence. If no document claim is used, return an empty `citations` array.
+- Put relevant whole-video locations in `video_moments` using `{"timestamp": number, "end_timestamp": number|null, "label": string, "reason": string, "source": "video_index|transcript|tracking|annotation", "confidence": "high|medium|low"}`.
+- In Q&A mode, return `training_procedure` as null.
+- In Training mode, return `training_procedure` as `{"title": string, "objective": string, "prerequisites": [string], "materials": [string], "safety_warnings": [string], "manual_verified": boolean, "steps": [{"id": string, "title": string, "instruction": string, "expected_result": string, "timestamp": number|null, "end_timestamp": number|null, "document_id": string, "filename": string, "page": number|null, "section": string, "components": [string], "warnings": [string]}]}`.
 """
 
 RAG_SYSTEM_PROMPT = """You are a patient machine-manual tutor. The user uploads manufacturing equipment manuals and asks how to operate, maintain, or troubleshoot their machine.
 
 When answering questions:
 1. Ground answers in the retrieved manual excerpts below whenever they are relevant.
-2. Cite source filenames inline when you rely on specific information.
+2. Return a pinpoint citation for every document-grounded claim. Include the exact document ID, filename, page number when available, section, and a short supporting excerpt.
 3. Teach step-by-step when explaining procedures - assume the user is learning the machine for the first time.
 4. If no manual is loaded or the retrieved context does not contain enough information, say so clearly.
 5. Respond in clear markdown.
@@ -85,6 +90,9 @@ def build_prompt(
     model_family: str = "custom",
     video_title: str | None = None,
     additional_notes: str = "",
+    mode: str = "qna",
+    video_evidence: list[dict[str, Any]] | None = None,
+    video_overview: dict[str, Any] | None = None,
 ) -> str:
     base_prompt = f"{OPERATOROS_VIDEO_CONTEXT}\n\n{SKETCHVLM_SYSTEM_PROMPT}\n\n{RAG_SYSTEM_PROMPT}"
     title_section = (
@@ -97,14 +105,29 @@ def build_prompt(
         if additional_notes.strip()
         else "Additional user-provided notes:\nNone.\n\n"
     )
+    safe_video_evidence = [
+        {key: value for key, value in item.items() if key != "frame_data_url"}
+        for item in (video_evidence or [])[:12]
+    ]
+    mode_requirements = (
+        "Generate a complete, ordered training procedure grounded in the supplied manual and whole-video evidence. "
+        "Prefer formal manual instructions for safety, link supported steps to exact pages and timestamps, identify "
+        "conflicts or missing evidence, and set manual_verified=false when no selected manual supports the procedure."
+        if mode == "training"
+        else "Answer the question directly. Use whole-video evidence only when it improves the answer, and return training_procedure as null."
+    )
     return (
         f"{base_prompt}\n\n"
         f"Model family: {model_family}\n\n"
         f"{title_section}"
         f"{notes_section}"
+        f"Interaction mode:\n{mode}\n\n"
+        f"Mode requirements:\n{mode_requirements}\n\n"
         f"Question:\n{question}\n\n"
         f"Normalized annotations:\n{_format_annotations(annotations)}\n\n"
         f"Transcript window:\n{transcript}\n\n"
+        f"Whole-video overview:\n{json.dumps(video_overview or {}, ensure_ascii=False, indent=2)}\n\n"
+        f"Retrieved whole-video moments:\n{json.dumps(safe_video_evidence, ensure_ascii=False, indent=2)}\n\n"
         f"## Retrieved context\n\n{docs}\n\n"
         "Answer requirements:\n"
         "- The JSON answer field may contain concise markdown-style prose, but the full response must still be valid JSON.\n"
@@ -119,5 +142,9 @@ def build_prompt(
         "- An explicit user request to track, follow, trace, or monitor always makes tracking appropriate; return at least one tracking target even if you cannot provide a box.\n"
         "- Each tracking annotation must be tighter than a general explanatory annotation and must identify only the object that target asks SAM3 to follow.\n"
         "- Do not invent manual details that are absent from the retrieved excerpts.\n"
+        "- Every claim derived from an attached document must have a matching pinpoint entry in `citations`.\n"
+        "- Copy document IDs and filenames exactly from the supplied document catalog.\n"
+        "- Use exact page numbers when available; otherwise provide the narrowest identifiable section and leave page null.\n"
+        "- Use `video_moments` for relevant source timestamps so the interface can provide clickable seeking.\n"
         "- When relevant, mention the annotated region using the normalized coordinate frame."
     )

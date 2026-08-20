@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-DEFAULT_MODEL = "google/gemini-3.1-pro-preview"
+DEFAULT_MODEL = "google/gemini-3.7-flash"
 
 MODEL_FAMILIES = {
     "gemini": {
         "models": {
+            "google/gemini-3.7-flash",
             "google/gemini-3.1-pro-preview",
             "google/gemini-3-flash-preview",
         },
@@ -47,4 +48,4 @@ def model_family_for(model: str) -> str:
 
 
 def model_supports_reasoning(model: str) -> bool:
-    return model == "google/gemini-3.1-pro-preview"
+    return model in {"google/gemini-3.7-flash", "google/gemini-3.1-pro-preview"}

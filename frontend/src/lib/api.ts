@@ -4,6 +4,8 @@ import type {
   DocumentIngestResponse,
   DocumentStatusResponse,
   MediaIngestResponse,
+  InteractionMode,
+  TimelineStatusResponse,
   TrackingOverlayManifest,
   TrackingTarget,
   TranscriptWindowResponse,
@@ -121,6 +123,52 @@ export async function uploadDocument(file: File): Promise<DocumentIngestResponse
   return response.json();
 }
 
+export async function getTimelineStatus(videoId: string): Promise<TimelineStatusResponse> {
+  const response = await fetch(
+    `${BASE_URL}/video/timeline/status?video_id=${encodeURIComponent(videoId)}`
+  );
+  if (!response.ok) throw new Error(await readApiError(response));
+  return response.json();
+}
+
+export async function rebuildTimeline(videoId: string): Promise<TimelineStatusResponse> {
+  const response = await fetch(
+    `${BASE_URL}/video/timeline/rebuild?video_id=${encodeURIComponent(videoId)}`,
+    { method: "POST" }
+  );
+  if (!response.ok) throw new Error(await readApiError(response));
+  return response.json();
+}
+
+export async function cancelTimeline(videoId: string): Promise<void> {
+  const response = await fetch(
+    `${BASE_URL}/video/timeline/cancel?video_id=${encodeURIComponent(videoId)}`,
+    { method: "POST" }
+  );
+  if (!response.ok) throw new Error(await readApiError(response));
+}
+
+export function getTimelineFrameUrl(videoId: string, timestamp: number): string {
+  return `${BASE_URL}/video/timeline/frame?video_id=${encodeURIComponent(videoId)}&timestamp=${timestamp}`;
+}
+
+export function getDocumentFileUrl(documentId: string, page?: number | null): string {
+  const base = `${BASE_URL}/documents/${encodeURIComponent(documentId)}/file`;
+  return page ? `${base}#page=${page}&view=FitH` : base;
+}
+
+export async function transcribeSpeech(blob: Blob, filename = "recording.webm"): Promise<string> {
+  const formData = new FormData();
+  formData.append("file", blob, filename);
+  const response = await fetch(`${BASE_URL}/speech/transcribe`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!response.ok) throw new Error(await readApiError(response));
+  const payload = (await response.json()) as { text?: unknown };
+  return typeof payload.text === "string" ? payload.text.trim() : "";
+}
+
 export async function getPreloadedDocuments(): Promise<DocumentIngestResponse[]> {
   const response = await fetch(`${BASE_URL}/documents/preloaded`);
   if (!response.ok) throw new Error(await readApiError(response));
@@ -149,6 +197,8 @@ export async function askQuestion(input: {
   document_ids: string[];
   model?: string;
   additional_notes?: string;
+  mode?: InteractionMode;
+  tracking_context?: Array<{ label: string; start: number; end: number }>;
 }, signal?: AbortSignal): Promise<Response> {
   return fetch(`${BASE_URL}/chat/stream`, {
     method: "POST",

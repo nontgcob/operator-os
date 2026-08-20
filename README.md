@@ -111,7 +111,10 @@ The default local path is no-Docker development. The launcher reads the reposito
 - `OPENROUTER_API_KEY` is required for VLM answers.
 - `OPENROUTER_PDF_ENGINE=native` is the default PDF handling mode.
 - To offer manuals before a run, place PDF files in `data/preloaded-manuals` (or set `RAGVLM_PRELOADED_DOCUMENT_DIR`). They appear as optional, unselected manuals in the UI after startup.
-- The default VLM model is `google/gemini-3.1-pro-preview`.
+- The default VLM model is `google/gemini-3.7-flash`.
+- Whole-video understanding samples one representative frame every 2 seconds, combines it with neighboring transcript context, and builds a searchable timeline in the background. Configure this with `VIDEO_INDEX_MODEL` and `VIDEO_INDEX_SEGMENT_SECONDS`.
+- Q&A responses can link to relevant video timestamps and pinpoint PDF pages. Training mode can turn video and selected-manual evidence into a source-linked step-by-step procedure.
+- The chat microphone uses the local Whisper service for speech-to-text; assistant responses can be read aloud by the browser.
 - `WHISPER_ENABLED=true` enables Whisper transcription. If Whisper cannot run, the video service writes fallback timestamp segments so the rest of the system can still operate.
 - Real SAM3 tracking expects a local Ultralytics-compatible checkpoint at `models/sam3.pt`, or a path set by `SAM3_CHECKPOINT_PATH`.
 - The SAM3 service loads its box and text predictors and initializes CUDA during service startup, so the first tracking request does not pay the model-loading cost.
