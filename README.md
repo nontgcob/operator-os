@@ -16,7 +16,7 @@ The current version is a local development/demo system. It is designed to prepar
 - Expects the VLM to return structured JSON containing the answer, visual annotations, an optional SAM3 tracking prompt, and optional tracking annotations.
 - Renders model-generated annotations over the paused video frame.
 - Starts SAM3 tracking when the user explicitly asks for tracking, when automatic tracking is enabled, or when the VLM returns a tracking target.
-- Stores frame-by-frame SAM3 mask polygons as independently visible tracking layers over the clean video, while retaining a rendered H.264 fallback artifact.
+- Stores frame-by-frame SAM3 mask polygons as independently visible tracking layers over the clean video. A rendered H.264 video is created only when the user chooses Export visible.
 
 ## How It Works
 
@@ -40,7 +40,7 @@ flowchart TD
 
     I["8. SAM3 Segmentation And Tracking<br/><br/>Orchestrator calls the SAM3 service<br/>SAM3 clips the source video from the paused timestamp<br/>Box-prompted SAM3 runs when a usable box exists<br/>Text-prompted SAM3 runs when only a description exists<br/>SAM3 segments and tracks the target frame by frame"]
 
-    J["9. Tracking Layer Output<br/><br/>Masks are stored with stable object IDs and source timestamps<br/>Frontend adds each object as a removable canvas layer<br/>Multiple tracking rounds remain independently visible<br/>A rendered H.264 artifact remains available as a fallback"]
+    J["9. Tracking Layer Output<br/><br/>Masks are stored with stable object IDs and source timestamps<br/>Frontend adds each object as a removable canvas layer<br/>Multiple tracking rounds remain independently visible<br/>A rendered H.264 artifact is generated only on export"]
 
     A --> B --> C --> D --> E --> F
     F -- "No" --> G
@@ -78,7 +78,7 @@ The paused frame is captured by the browser from the actual video player at the 
 
 SAM3 does not depend on the VLM returning a perfect bounding box. If the VLM returns `tracking_annotations`, OperatorOS can convert those into box prompts. If no usable box exists, it can use the VLM's `tracking_prompt`, or the user's original tracking request, as a text prompt.
 
-The primary SAM3 output is now a non-destructive set of frame-synchronized polygon layers over the clean source video. Each tracking round appends independently selectable objects, so earlier tracks can be hidden or removed without rerunning later rounds. The service still creates rendered and clean clip artifacts as compatibility fallbacks.
+The primary SAM3 output is a non-destructive set of frame-synchronized polygon layers over the clean source video. Each tracking round appends independently selectable objects, so earlier tracks can be hidden or removed without rerunning later rounds. Tracking completes as soon as these overlays are ready. The service creates a rendered MP4 only when the user exports the currently visible items.
 
 ## Quick Start
 
@@ -114,6 +114,7 @@ The default local path is no-Docker development. The launcher reads the reposito
 - The default VLM model is `google/gemini-3.1-pro-preview`.
 - `WHISPER_ENABLED=true` enables Whisper transcription. If Whisper cannot run, the video service writes fallback timestamp segments so the rest of the system can still operate.
 - Real SAM3 tracking expects a local Ultralytics-compatible checkpoint at `models/sam3.pt`, or a path set by `SAM3_CHECKPOINT_PATH`.
+- The SAM3 service loads its box and text predictors and initializes CUDA during service startup, so the first tracking request does not pay the model-loading cost.
 - `SAM3_MAX_PROPAGATION_FRAMES=0` means process the full remaining video after the paused timestamp. Set a positive value to cap tracking length for faster demos.
 - Keep `SAM3_ALLOW_SIMULATION_FALLBACK=false` for real demos. Simulation is only for development.
 - `USE_WORKER_QUEUE=false` uses direct service calls. Set it to `true` only when Redis/RQ workers are configured.

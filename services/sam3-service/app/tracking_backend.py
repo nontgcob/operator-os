@@ -220,6 +220,24 @@ class Sam3TrackingBackend:
             async for update in self._track_in_worker(job, video_path):
                 yield update
 
+    async def warmup(self) -> None:
+        """Load both predictor variants before the first user tracking request."""
+        if not self.status().ready:
+            return
+        await self._load_predictor("boxes")
+        await self._load_predictor("text")
+
+        def initialize_cuda() -> None:
+            import torch
+
+            if not torch.cuda.is_available() or self.config.device == "cpu":
+                return
+            sample = torch.ones((128, 128), device="cuda")
+            _ = sample @ sample
+            torch.cuda.synchronize()
+
+        await asyncio.to_thread(initialize_cuda)
+
     def _video_path(self, video_id: str) -> Path:
         return self.config.video_root / video_id / "source.mp4"
 
@@ -249,7 +267,11 @@ class Sam3TrackingBackend:
                 if self.config.device:
                     overrides["device"] = self.config.device
                 predictor_cls = SAM3VideoPredictor if predictor_type == "boxes" else SAM3VideoSemanticPredictor
-                return predictor_cls(overrides=overrides)
+                predictor = predictor_cls(overrides=overrides)
+                # SAM predictors build the PyTorch model from args.model internally. Passing the
+                # checkpoint string as `model` makes SAM call `.to()` on that string.
+                predictor.setup_model(verbose=False)
+                return predictor
 
             self._predictors[predictor_type] = await asyncio.to_thread(load_model)
             return self._predictors[predictor_type]
@@ -323,42 +345,24 @@ class Sam3TrackingBackend:
         }
         clip_path, frame_width, frame_height, clip_fps, clip_frame_count = self._clip_from_timestamp(video_path, job)
         boxes = annotation_boxes_xywh(targets[0]["annotations"]) if len(targets) == 1 else []
-        rendered_path = self.config.rendered_video_root / f"{job.tracking_job_id}.mp4"
-        clean_path = self.config.rendered_video_root / f"{job.tracking_job_id}.clean.mp4"
-        working_rendered_path = rendered_path.with_suffix(".working.mp4")
-        rendered_path.parent.mkdir(parents=True, exist_ok=True)
-        rendered_writer: Any = None
-
-        if boxes:
-            pixel_boxes = [_xywh_unit_to_xyxy_pixels(box, frame_width, frame_height) for box in boxes]
-            results = predictor(source=str(clip_path), bboxes=pixel_boxes, stream=True)
-        else:
-            results = predictor(source=str(clip_path), text=[target["prompt"] for target in targets], stream=True)
-
         total = max(1, clip_frame_count)
         cancelled = False
+        processed_frames = 0
+        results: Any = None
         try:
+            if boxes:
+                pixel_boxes = [_xywh_unit_to_xyxy_pixels(box, frame_width, frame_height) for box in boxes]
+                results = predictor(source=str(clip_path), bboxes=pixel_boxes, stream=True)
+            else:
+                results = predictor(source=str(clip_path), text=[target["prompt"] for target in targets], stream=True)
+
             for index, result in enumerate(results, start=1):
                 if tracking_cancel_requested(job):
                     cancelled = True
                     break
                 timestamp = job.timestamp + ((index - 1) / clip_fps)
-                rendered_frame = _render_result_mask(result)
                 frame_overlays = ultralytics_result_to_overlays(result, timestamp, targets=targets)
-                if rendered_frame is not None:
-                    if rendered_writer is None:
-                        import cv2
-
-                        frame_height, frame_width = rendered_frame.shape[:2]
-                        rendered_writer = cv2.VideoWriter(
-                            str(working_rendered_path),
-                            cv2.VideoWriter_fourcc(*"mp4v"),
-                            clip_fps,
-                            (frame_width, frame_height),
-                        )
-                        if not rendered_writer.isOpened():
-                            raise RuntimeError(f"Unable to create rendered SAM3 video: {working_rendered_path}")
-                    rendered_writer.write(rendered_frame)
+                processed_frames = index
                 progress = min(99, round((index / total) * 100))
                 yield {
                     "done": False,
@@ -374,51 +378,14 @@ class Sam3TrackingBackend:
             close_results = getattr(results, "close", None)
             if callable(close_results):
                 close_results()
-            if rendered_writer is not None:
-                rendered_writer.release()
+            clip_path.unlink(missing_ok=True)
 
         if cancelled or tracking_cancel_requested(job):
-            working_rendered_path.unlink(missing_ok=True)
-            clip_path.unlink(missing_ok=True)
             yield tracking_cancelled_payload(self.name, targets)
             return
 
-        if rendered_writer is None or not working_rendered_path.exists():
-            raise RuntimeError("SAM3 completed without producing a rendered tracking video.")
-        yield {
-            "done": False,
-            "progress": 99,
-            "stage": "finalizing",
-            "target_progress": tracking_target_progress(targets, 99, "finalizing"),
-            "overlays": [],
-            "backend": self.name,
-        }
-        if tracking_cancel_requested(job):
-            working_rendered_path.unlink(missing_ok=True)
-            clip_path.unlink(missing_ok=True)
-            yield tracking_cancelled_payload(self.name, targets)
-            return
-        _transcode_rendered_video(working_rendered_path, rendered_path)
-        if tracking_cancel_requested(job):
-            rendered_path.unlink(missing_ok=True)
-            clip_path.unlink(missing_ok=True)
-            yield tracking_cancelled_payload(self.name, targets)
-            return
-        try:
-            _encode_clean_video_slice(
-                video_path,
-                clean_path,
-                start_seconds=job.timestamp,
-                duration_seconds=clip_frame_count / clip_fps,
-            )
-        finally:
-            clip_path.unlink(missing_ok=True)
-
-        if tracking_cancel_requested(job):
-            rendered_path.unlink(missing_ok=True)
-            clean_path.unlink(missing_ok=True)
-            yield tracking_cancelled_payload(self.name, targets)
-            return
+        if processed_frames == 0:
+            raise RuntimeError("SAM3 completed without processing any video frames.")
 
         yield {
             "done": True,
@@ -427,8 +394,6 @@ class Sam3TrackingBackend:
             "target_progress": tracking_target_progress(targets, 100, "complete"),
             "overlays": [],
             "backend": self.name,
-            "rendered_video_path": str(rendered_path),
-            "clean_video_path": str(clean_path),
         }
 
     def _clip_from_timestamp(self, video_path: Path, job: TrackingJob) -> tuple[Path, int, int, float, int]:
@@ -848,6 +813,98 @@ def _render_result_mask(result: Any) -> Any:
             ).astype(bool)
         annotated[binary] = (0.55 * annotated[binary] + 0.45 * color).astype(np.uint8)
     return annotated
+
+
+def render_tracking_export(
+    video_path: Path,
+    output_path: Path,
+    overlays: list[dict[str, Any]],
+) -> Path:
+    """Bake selected interactive overlays into an MP4 only when export is requested."""
+    import cv2
+    import numpy as np
+
+    if not overlays:
+        raise ValueError("At least one visible tracking layer is required for export.")
+
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise RuntimeError(f"Unable to open source video for tracking export: {video_path}")
+
+    fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_count = max(1, int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
+    overlays_by_frame: dict[int, list[dict[str, Any]]] = {}
+    for overlay in overlays:
+        frame_index = max(0, round(float(overlay.get("timestamp", 0.0)) * fps))
+        overlays_by_frame.setdefault(frame_index, []).append(overlay)
+
+    start_frame = max(0, min(overlays_by_frame))
+    end_frame = min(frame_count - 1, max(overlays_by_frame))
+    working_path = output_path.with_suffix(".working.mp4")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(working_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        capture.release()
+        working_path.unlink(missing_ok=True)
+        raise RuntimeError("Unable to create the temporary tracking export video.")
+
+    written = 0
+    write_succeeded = False
+    try:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        for frame_index in range(start_frame, end_frame + 1):
+            ok, frame = capture.read()
+            if not ok:
+                break
+            for overlay in overlays_by_frame.get(frame_index, []):
+                points = overlay.get("points") or []
+                if len(points) < 3:
+                    continue
+                polygon = np.asarray(
+                    [
+                        [
+                            round(float(point.get("x", 0.0)) / 100.0 * width),
+                            round(float(point.get("y", 0.0)) / 100.0 * height),
+                        ]
+                        for point in points
+                    ],
+                    dtype=np.int32,
+                )
+                color = str(overlay.get("color") or DEFAULT_OVERLAY_COLOR)
+                if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+                    color = DEFAULT_OVERLAY_COLOR
+                rgb = tuple(int(color[index : index + 2], 16) for index in (1, 3, 5))
+                bgr = (rgb[2], rgb[1], rgb[0])
+                mask_layer = frame.copy()
+                cv2.fillPoly(mask_layer, [polygon], bgr)
+                frame = cv2.addWeighted(mask_layer, 0.38, frame, 0.62, 0)
+                cv2.polylines(frame, [polygon], True, bgr, 2, cv2.LINE_AA)
+            writer.write(frame)
+            written += 1
+        write_succeeded = True
+    finally:
+        writer.release()
+        capture.release()
+        if not write_succeeded:
+            working_path.unlink(missing_ok=True)
+
+    if written == 0:
+        working_path.unlink(missing_ok=True)
+        raise RuntimeError("No source video frames were available for tracking export.")
+    try:
+        _transcode_rendered_video(working_path, output_path)
+    except Exception:
+        working_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
+        raise
+    return output_path
 
 
 def _transcode_rendered_video(input_path: Path, output_path: Path) -> None:

@@ -257,6 +257,18 @@ class TrackingStartRequest(BaseModel):
     targets: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class TrackingExportLayer(BaseModel):
+    job_id: str
+    track_ids: list[str]
+    color: str
+    label: str = "Tracked object"
+
+
+class TrackingExportRequest(BaseModel):
+    video_id: str
+    layers: list[TrackingExportLayer]
+
+
 async def _youtube_url_from_request(request: Request, form_value: str | None = None) -> str | None:
     if form_value and form_value.strip():
         return form_value.strip()
@@ -1038,16 +1050,23 @@ async def cancel_tracking(tracking_job_id: str) -> Response:
     return Response(content=response_content, media_type="application/json")
 
 
-async def _proxy_tracking_video(upstream_path: str, request: Request) -> StreamingResponse:
+async def _proxy_tracking_video(
+    upstream_path: str,
+    request: Request | None = None,
+    *,
+    method: str = "GET",
+    json_body: dict[str, Any] | None = None,
+) -> StreamingResponse:
     headers = {}
-    if range_header := request.headers.get("range"):
+    if request is not None and (range_header := request.headers.get("range")):
         headers["Range"] = range_header
     client = httpx.AsyncClient(timeout=None)
     upstream = await client.send(
         client.build_request(
-            "GET",
+            method,
             f"{SAM3_SERVICE_URL}{upstream_path}",
             headers=headers,
+            json=json_body,
         ),
         stream=True,
     )
@@ -1068,7 +1087,7 @@ async def _proxy_tracking_video(upstream_path: str, request: Request) -> Streami
     passthrough = {
         key: value
         for key, value in upstream.headers.items()
-        if key.lower() in {"accept-ranges", "content-length", "content-range"}
+        if key.lower() in {"accept-ranges", "content-length", "content-range", "content-disposition"}
     }
     return StreamingResponse(
         stream_video(),
@@ -1086,6 +1105,15 @@ async def tracking_video(tracking_job_id: str, request: Request) -> StreamingRes
 @app.get("/tracking/clean-video/{tracking_job_id}")
 async def clean_tracking_video(tracking_job_id: str, request: Request) -> StreamingResponse:
     return await _proxy_tracking_video(f"/tracking/clean-video/{tracking_job_id}", request)
+
+
+@app.post("/tracking/export")
+async def export_tracking_video(payload: TrackingExportRequest) -> StreamingResponse:
+    return await _proxy_tracking_video(
+        "/tracking/export",
+        method="POST",
+        json_body=payload.model_dump(),
+    )
 
 
 @app.get("/tracking/overlays/{tracking_job_id}")

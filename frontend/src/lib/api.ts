@@ -263,3 +263,23 @@ export async function getTrackingOverlays(trackingJobId: string): Promise<Tracki
   }
   return response.json();
 }
+
+export async function exportTrackingVideo(input: {
+  video_id: string;
+  layers: Array<{
+    job_id: string;
+    track_ids: string[];
+    color: string;
+    label: string;
+  }>;
+}): Promise<Blob> {
+  const response = await fetch(`${BASE_URL}/tracking/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+  return response.blob();
+}

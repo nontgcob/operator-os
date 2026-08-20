@@ -22,6 +22,7 @@ import {
   askQuestion,
   cancelTracking,
   clearChatSession,
+  exportTrackingVideo,
   revealComparison,
   getMediaSourceUrl,
   getPreloadedDocuments,
@@ -310,6 +311,8 @@ export default function Home() {
   const [activeTrackingJobs, setActiveTrackingJobs] = useState<ActiveTrackingJob[]>([]);
   const [trackingStatus, setTrackingStatus] = useState("");
   const [trackingError, setTrackingError] = useState("");
+  const [trackingExporting, setTrackingExporting] = useState(false);
+  const [trackingExportStatus, setTrackingExportStatus] = useState("");
   const [chatClearStatus, setChatClearStatus] = useState("");
   const [sendAnnotatedSnapshot, setSendAnnotatedSnapshot] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -453,6 +456,8 @@ export default function Home() {
     replaceActiveTrackingJobs([]);
     setTrackingStatus("");
     setTrackingError("");
+    setTrackingExporting(false);
+    setTrackingExportStatus("");
     setChatMessages([]);
     setChatClearStatus("");
     setAdditionalNotes("");
@@ -515,6 +520,46 @@ export default function Home() {
     replaceTrackingLayers([]);
     setTrackingStatus("All tracking items removed.");
     setTrackingError("");
+    setTrackingExportStatus("");
+  }
+
+  async function exportVisibleTrackingVideo() {
+    const visibleLayers = showTrackingOverlays
+      ? trackingLayersRef.current.filter((layer) => layer.visible)
+      : [];
+    if (!videoId || !visibleLayers.length || trackingExporting) return;
+
+    setTrackingExporting(true);
+    setTrackingExportStatus("Rendering the visible tracking items into a video...");
+    setTrackingError("");
+    try {
+      const blob = await exportTrackingVideo({
+        video_id: videoId,
+        layers: visibleLayers.map((layer) => ({
+          job_id: layer.jobId,
+          track_ids: Array.from(new Set(layer.overlays.map((overlay) => overlay.track_id))),
+          color: layer.color,
+          label: layer.label,
+        })),
+      });
+      const downloadUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const safeTitle = (videoTitle || "operatoros-tracking")
+        .replace(/[^a-z0-9_-]+/gi, "-")
+        .replace(/^-+|-+$/g, "") || "operatoros-tracking";
+      link.href = downloadUrl;
+      link.download = `${safeTitle}-tracked.mp4`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+      setTrackingExportStatus("Tracked video exported.");
+    } catch (error) {
+      setTrackingExportStatus("");
+      setTrackingError(`Unable to export tracked video: ${errorMessage(error)}`);
+    } finally {
+      setTrackingExporting(false);
+    }
   }
 
   async function requestTrackingCancellation(job: ActiveTrackingJob) {
@@ -555,6 +600,7 @@ export default function Home() {
     replaceTrackingLayers([]);
     setTrackingStatus("");
     setTrackingError("");
+    setTrackingExportStatus("");
     setShowTrackingOverlays(false);
     setVideoTimeOffset(0);
     setTimestamp(0);
@@ -589,6 +635,8 @@ export default function Home() {
     replaceActiveTrackingJobs([]);
     setTrackingStatus("");
     setTrackingError("");
+    setTrackingExporting(false);
+    setTrackingExportStatus("");
     setShowTrackingOverlays(false);
     setTrackingEnabled(false);
     setSendAnnotatedSnapshot(false);
@@ -1193,8 +1241,6 @@ export default function Home() {
               target_progress?: TrackingTargetProgress[];
               backend?: string;
               overlays: TrackingOverlay[];
-              rendered_video_path?: string;
-              clean_video_path?: string;
               error?: { message?: string };
             };
             if (payload.tracking_job_id && payload.tracking_job_id !== trackingJobId) return;
@@ -1763,6 +1809,20 @@ export default function Home() {
                   >
                     Hide all
                   </button>
+                  <button
+                    type="button"
+                    className="op-layer-action"
+                    disabled={
+                      trackingExporting ||
+                      !videoId ||
+                      !showTrackingOverlays ||
+                      visibleTrackingCount === 0
+                    }
+                    onClick={() => void exportVisibleTrackingVideo()}
+                    title="Download a video with the currently visible tracking items baked in"
+                  >
+                    {trackingExporting ? "Exporting..." : "Export visible"}
+                  </button>
                 </div>
               </div>
               {!trackingLayers.length ? (
@@ -1853,6 +1913,9 @@ export default function Home() {
                   Showing {visibleTrackingCount} out of {totalTrackingCount} tracked item
                   {totalTrackingCount === 1 ? "" : "s"}.
                 </p>
+              )}
+              {trackingExportStatus && (
+                <p className="op-status-text" role="status">{trackingExportStatus}</p>
               )}
             </div>
             <p className="op-help-text">

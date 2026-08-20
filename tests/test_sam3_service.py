@@ -108,6 +108,191 @@ def test_completed_tracking_persists_a_fetchable_overlay_manifest(monkeypatch, t
     assert len(manifest["overlays"]) == 2
 
 
+def test_tracking_completes_with_overlays_without_rendering_videos(monkeypatch, tmp_path: Path) -> None:
+    clip_path = tmp_path / "input-clip.mp4"
+    clip_path.write_bytes(b"temporary")
+    runner = tracking_backend.Sam3TrackingBackend(
+        tracking_backend.TrackingBackendConfig(rendered_video_root=tmp_path)
+    )
+    monkeypatch.setattr(
+        runner,
+        "_clip_from_timestamp",
+        lambda _video_path, _job: (clip_path, 8, 8, 30.0, 1),
+    )
+    monkeypatch.setattr(
+        tracking_backend,
+        "_transcode_rendered_video",
+        lambda *_args, **_kwargs: pytest.fail("Normal tracking must not transcode a rendered video"),
+    )
+    monkeypatch.setattr(
+        tracking_backend,
+        "_encode_clean_video_slice",
+        lambda *_args, **_kwargs: pytest.fail("Normal tracking must not encode a clean clip"),
+    )
+    mask = np.ones((8, 8), dtype=np.float32)
+    result = SimpleNamespace(
+        orig_shape=(8, 8),
+        masks=SimpleNamespace(data=np.asarray([mask])),
+        boxes=SimpleNamespace(conf=np.asarray([0.9]), id=np.asarray([1]), cls=None, xyxy=None),
+    )
+
+    class FakePredictor:
+        def __call__(self, **_kwargs: Any):
+            return iter([result])
+
+    updates = list(
+        runner._run_sam3_sync(
+            FakePredictor(),
+            tracking_backend.TrackingJob(**_tracking_request()),
+            tmp_path / "source.mp4",
+        )
+    )
+
+    assert updates[-1]["done"] is True
+    assert updates[-1]["stage"] == "complete"
+    assert "rendered_video_path" not in updates[-1]
+    assert "clean_video_path" not in updates[-1]
+    assert not clip_path.exists()
+
+
+def test_sam3_jobs_remain_sequential(monkeypatch, tmp_path: Path) -> None:
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"video")
+    runner = tracking_backend.Sam3TrackingBackend(tracking_backend.TrackingBackendConfig())
+    monkeypatch.setattr(
+        runner,
+        "status",
+        lambda: tracking_backend.TrackingBackendStatus(backend="sam3", ready=True),
+    )
+    monkeypatch.setattr(runner, "_video_path", lambda _video_id: source_path)
+    active = 0
+    maximum_active = 0
+
+    async def fake_worker(_job: Any, _video_path: Path):
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        await asyncio.sleep(0.01)
+        yield {"done": True, "overlays": []}
+        active -= 1
+
+    monkeypatch.setattr(runner, "_track_in_worker", fake_worker)
+
+    async def collect(job_id: str) -> list[dict[str, Any]]:
+        request = {**_tracking_request(), "tracking_job_id": job_id}
+        return [update async for update in runner.track(tracking_backend.TrackingJob(**request))]
+
+    async def run_both() -> None:
+        await asyncio.gather(collect("job-1"), collect("job-2"))
+
+    asyncio.run(run_both())
+
+    assert maximum_active == 1
+
+
+def test_service_startup_warms_the_sam3_backend() -> None:
+    module = _load_sam3_main()
+
+    class WarmableBackend:
+        name = "sam3"
+
+        def __init__(self) -> None:
+            self.warmed = False
+
+        def status(self) -> Any:
+            return SimpleNamespace(ready=True, backend="sam3", code=None, message=None)
+
+        async def warmup(self) -> None:
+            self.warmed = True
+
+    backend = WarmableBackend()
+    module._tracking_backend = backend
+
+    with TestClient(module.app):
+        assert backend.warmed is True
+        assert module._warmup_status["state"] == "ready"
+
+
+def test_predictor_loading_uses_sam_model_setup_contract(monkeypatch, tmp_path: Path) -> None:
+    sam_module = importlib.import_module("ultralytics.models.sam")
+    checkpoint = tmp_path / "sam3.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    calls: dict[str, Any] = {}
+
+    class FakePredictor:
+        def __init__(self, *, overrides: dict[str, Any]) -> None:
+            calls["overrides"] = overrides
+            self.done_warmup = False
+
+        def setup_model(self, model: Any = None, *, verbose: bool) -> None:
+            calls["setup_model"] = model
+            calls["setup_verbose"] = verbose
+            self.done_warmup = True
+
+    monkeypatch.setattr(sam_module, "SAM3VideoPredictor", FakePredictor)
+    runner = tracking_backend.Sam3TrackingBackend(
+        tracking_backend.TrackingBackendConfig(checkpoint_path=checkpoint, image_size=640)
+    )
+
+    predictor = asyncio.run(runner._load_predictor("boxes"))
+
+    assert calls["overrides"]["model"] == str(checkpoint)
+    assert calls["setup_model"] is None
+    assert calls["setup_verbose"] is False
+    assert predictor.done_warmup is True
+
+
+def test_export_renders_selected_overlays_only_on_request(monkeypatch, tmp_path: Path) -> None:
+    module = _load_sam3_main()
+    video_root = tmp_path / "video"
+    tracking_root = tmp_path / "tracking"
+    source_path = video_root / "video-1" / "source.mp4"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_bytes(b"source-video")
+    tracking_root.mkdir()
+    (tracking_root / "job-1.overlays.json").write_text(
+        json.dumps(
+            {
+                "tracking_job_id": "job-1",
+                "overlays": [
+                    {"track_id": "keep", "timestamp": 1.0, "color": "#000000", "points": []},
+                    {"track_id": "hide", "timestamp": 1.0, "color": "#000000", "points": []},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SAM3_VIDEO_ROOT", str(video_root))
+    monkeypatch.setenv("SAM3_RENDERED_VIDEO_ROOT", str(tracking_root))
+    received: list[dict[str, Any]] = []
+
+    def fake_render(_source: Path, output: Path, overlays: list[dict[str, Any]]) -> Path:
+        received.extend(overlays)
+        output.write_bytes(b"rendered-on-demand")
+        return output
+
+    monkeypatch.setattr(module, "render_tracking_export", fake_render)
+    response = TestClient(module.app).post(
+        "/tracking/export",
+        json={
+            "video_id": "video-1",
+            "layers": [
+                {
+                    "job_id": "job-1",
+                    "track_ids": ["keep"],
+                    "color": "#facc15",
+                    "label": "Lever",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"rendered-on-demand"
+    assert [overlay["track_id"] for overlay in received] == ["keep"]
+    assert received[0]["color"] == "#facc15"
+
+
 def test_tracking_cancel_sets_signal_and_persists_cancelled_status() -> None:
     module = _load_sam3_main()
     fake_redis = FakeRedis()

@@ -6,17 +6,21 @@ import re
 import asyncio
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from app.tracking_backend import (
     TrackingBackend,
     TrackingJob,
     build_tracking_backend,
+    render_tracking_export,
     tracking_cancelled_payload,
     tracking_error_payload,
 )
@@ -29,12 +33,30 @@ except ImportError:
 if load_env_file:
     load_env_file()
 
-app = FastAPI(title="OperatorOS SAM3 Service", version="0.1.0")
-
 TRACKING_TTL_SECONDS = 3600
 USE_REDIS_STATE = os.getenv("USE_REDIS_STATE", "false").lower() == "true"
 _tracking_backend: TrackingBackend | None = None
 _tracking_cancel_events: dict[str, threading.Event] = {}
+_warmup_status: dict[str, str | None] = {"state": "pending", "error": None}
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    backend = get_tracking_backend()
+    warmup = getattr(backend, "warmup", None)
+    if callable(warmup):
+        _warmup_status.update(state="warming", error=None)
+        try:
+            await warmup()
+            _warmup_status.update(state="ready", error=None)
+        except Exception as exc:
+            _warmup_status.update(state="error", error=str(exc))
+    else:
+        _warmup_status.update(state="not_applicable", error=None)
+    yield
+
+
+app = FastAPI(title="OperatorOS SAM3 Service", version="0.1.0", lifespan=lifespan)
 
 
 class _MemoryState:
@@ -78,6 +100,18 @@ class TrackingStartRequest(BaseModel):
     segmentation_prompt: str = ""
     annotations: list[dict[str, Any]] = Field(default_factory=list)
     targets: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class TrackingExportLayer(BaseModel):
+    job_id: str = Field(pattern=r"^[A-Za-z0-9-]+$")
+    track_ids: list[str] = Field(min_length=1)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+    label: str = "Tracked object"
+
+
+class TrackingExportRequest(BaseModel):
+    video_id: str = Field(pattern=r"^[A-Za-z0-9_-]+$")
+    layers: list[TrackingExportLayer] = Field(min_length=1)
 
 
 def get_tracking_backend() -> TrackingBackend:
@@ -197,7 +231,7 @@ async def health() -> dict[str, Any]:
     except (ImportError, RuntimeError):
         cuda_available = None
     return {
-        "status": "ok" if backend_status.ready else "degraded",
+        "status": "ok" if backend_status.ready and _warmup_status["state"] != "error" else "degraded",
         "backend": backend_status.backend,
         "backend_ready": backend_status.ready,
         "backend_error": backend_status.code,
@@ -211,6 +245,8 @@ async def health() -> dict[str, Any]:
         "gpu_name": gpu_name,
         "max_propagation_frames": getattr(backend_config, "max_frames", None),
         "image_size": getattr(backend_config, "image_size", None),
+        "warmup_state": _warmup_status["state"],
+        "warmup_error": _warmup_status["error"],
         "simulation_enabled": os.getenv("SAM3_TRACKING_BACKEND", "sam3").strip().lower() == "simulation"
         and os.getenv("SAM3_ALLOW_SIMULATION_FALLBACK", "false").lower() == "true",
     }
@@ -323,6 +359,46 @@ async def tracking_overlays(tracking_job_id: str) -> FileResponse:
     if not overlay_path.is_file():
         raise HTTPException(status_code=404, detail="Tracking overlays were not found")
     return FileResponse(overlay_path, media_type="application/json", filename=f"{tracking_job_id}.overlays.json")
+
+
+@app.post("/tracking/export")
+async def export_tracking_video(payload: TrackingExportRequest) -> FileResponse:
+    selected_overlays: list[dict[str, Any]] = []
+    for layer in payload.layers:
+        overlay_path = _tracking_overlay_path(layer.job_id)
+        if not overlay_path.is_file():
+            raise HTTPException(status_code=404, detail=f"Tracking overlays were not found for {layer.job_id}")
+        manifest = json.loads(overlay_path.read_text(encoding="utf-8"))
+        selected_track_ids = set(layer.track_ids)
+        selected_overlays.extend(
+            {**overlay, "color": layer.color, "target_color": layer.color}
+            for overlay in manifest.get("overlays", [])
+            if overlay.get("track_id") in selected_track_ids
+        )
+
+    if not selected_overlays:
+        raise HTTPException(status_code=400, detail="The selected tracking items do not contain any masks")
+
+    video_root = Path(os.getenv("SAM3_VIDEO_ROOT", "data/video")).expanduser().resolve()
+    video_path = (video_root / payload.video_id / "source.mp4").resolve()
+    if video_root not in video_path.parents or not video_path.is_file():
+        raise HTTPException(status_code=404, detail="Source video was not found")
+
+    output_root = Path(os.getenv("SAM3_RENDERED_VIDEO_ROOT", "./data/tracking")).expanduser()
+    export_id = str(uuid4())
+    output_path = output_root / f"export-{export_id}.mp4"
+    try:
+        await asyncio.to_thread(render_tracking_export, video_path, output_path, selected_overlays)
+    except (OSError, RuntimeError, ValueError) as exc:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Unable to export tracking video: {exc}") from exc
+
+    return FileResponse(
+        output_path,
+        media_type="video/mp4",
+        filename=f"operatoros-tracking-{export_id[:8]}.mp4",
+        background=BackgroundTask(output_path.unlink, missing_ok=True),
+    )
 
 
 @app.get("/tracking/events/{tracking_job_id}")
