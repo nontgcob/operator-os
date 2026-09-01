@@ -70,6 +70,30 @@ def test_training_prompt_with_selected_pdf_includes_exact_citation_catalog(tmp_p
     assert '"document_id": "manual-training"' in prompt
     assert '"filename": "machine-manual.pdf"' in prompt
     assert "Interaction mode:\ntraining" in prompt
+    assert "interface reveals training_procedure one step at a time" in prompt
+    assert "procedure plan only" in prompt
+    assert "timestamp=null, end_timestamp=null, and annotations=[]" in prompt
+    assert "separate text-only frame-selection request" in prompt
+    assert "TRAINING PLAN CHECK" in prompt
+
+
+def test_training_candidates_keep_images_private_from_selector_metadata() -> None:
+    candidates = ragvlm_main._training_candidates(
+        [
+            {
+                "segment_id": "segment-1",
+                "representative_timestamp": 2.0,
+                "summary": "Close view of the lever",
+                "objects": ["lever"],
+                "frame_data_url": "data:image/jpeg;base64,/9j/2Q==",
+            }
+        ]
+    )
+
+    assert candidates[0]["candidate_id"] == "segment-1"
+    assert candidates[0]["frame_data_url"].startswith("data:image/jpeg")
+    assert "frame_data_url" not in candidates[0]["public"]
+    assert candidates[0]["public"]["timestamp"] == 2.0
 
 
 def test_removed_text_artifact_and_text_rag_endpoints_return_410(tmp_path: Path) -> None:

@@ -68,6 +68,7 @@ export interface MediaIngestResponse {
   video_id: string;
   title?: string;
   source?: "upload" | "youtube" | "unknown";
+  snapshot_interval_seconds?: number;
 }
 
 export interface VideoMetadataResponse {
@@ -119,6 +120,9 @@ export interface TrainingStep {
   section?: string;
   components: string[];
   warnings: string[];
+  annotations: Annotation[];
+  visual_status?: "pending" | "selecting_frame" | "generating_annotation" | "ready" | "error";
+  visual_error?: string;
 }
 
 export interface TrainingProcedure {
@@ -139,6 +143,7 @@ export interface TimelineStatusResponse {
   warning?: string | null;
   error?: string | null;
   segment_count?: number;
+  snapshot_interval_seconds?: number;
 }
 
 export interface DocumentStatusResponse {

@@ -16,7 +16,7 @@ import {
   revealTurn,
 } from "@/lib/comparisonState";
 import { readComparisonSSE } from "@/lib/comparisonStream";
-import { parseModelResponse, partialAnswerFromModelResponse } from "@/lib/parseResponse";
+import { parseModelResponse, parseTrainingStep, partialAnswerFromModelResponse } from "@/lib/parseResponse";
 import { explicitlyRequestsTracking } from "@/lib/trackingIntent";
 import { excludeTrackedTargets } from "@/lib/trackingDedup";
 import { colorizeTrackingTargets, createTrackingLayers } from "@/lib/trackingLayers";
@@ -37,6 +37,7 @@ import {
   getVideoMetadata,
   ingestYoutubeUrl,
   rebuildTimeline,
+  regenerateTrainingAnnotation,
   startTracking,
   transcribeSpeech,
   uploadDocument,
@@ -52,6 +53,7 @@ import type {
   InteractionMode,
   TimelineStatusResponse,
   TrainingProcedure,
+  TrainingStep,
   TrackingLayer,
   TrackingOverlay,
   TrackingTarget,
@@ -75,6 +77,7 @@ interface ChatMessage {
   citations?: DocumentCitation[];
   videoMoments?: VideoMoment[];
   trainingProcedure?: TrainingProcedure | null;
+  mode?: InteractionMode;
 }
 
 interface UploadedDocument {
@@ -147,6 +150,7 @@ const RAGVLM_MODELS = [
 
 const DEFAULT_RAGVLM_MODEL = "google/gemini-3.7-flash";
 type Theme = "light" | "dark";
+type SnapshotIntervalUnit = "seconds" | "minutes";
 
 function ThemeIcon({ theme }: { theme: Theme }) {
   return theme === "dark" ? (
@@ -166,6 +170,17 @@ function formatTimestamp(seconds: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const remainingSeconds = totalSeconds % 60;
   return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
+}
+
+function formatSnapshotInterval(seconds: number): string {
+  if (seconds >= 60 && seconds % 60 === 0) {
+    const minutes = seconds / 60;
+    return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  }
+  const displayedSeconds = Number.isInteger(seconds)
+    ? seconds.toString()
+    : seconds.toFixed(1).replace(/\.0$/, "");
+  return `${displayedSeconds} ${seconds === 1 ? "second" : "seconds"}`;
 }
 
 function formatAnswerText(content: string) {
@@ -252,9 +267,11 @@ function readSSE(
   {
     onDelta,
     onError,
+    onEvent,
   }: {
     onDelta: (chunk: string) => void;
     onError: (message: string) => void;
+    onEvent?: (eventType: string, payload: string) => void;
   }
 ) {
   const reader = response.body?.getReader();
@@ -279,6 +296,10 @@ function readSSE(
         return true;
       }
       if (payload.trim() === "[DONE]") return true;
+      if (eventType !== "message") {
+        onEvent?.(eventType, payload);
+        return false;
+      }
       onDelta(payload);
       return false;
     }
@@ -303,6 +324,8 @@ function readSSE(
 export default function Home() {
   const [theme, setTheme] = useState<Theme>("light");
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoContentRef = useRef<HTMLDivElement | null>(null);
+  const [videoDisplayHeight, setVideoDisplayHeight] = useState(520);
   const [videoUrl, setVideoUrl] = useState<string>("");
   const [originalVideoUrl, setOriginalVideoUrl] = useState<string>("");
   const [videoId, setVideoId] = useState<string>("");
@@ -329,6 +352,8 @@ export default function Home() {
   const [ingesting, setIngesting] = useState(false);
   const [ingestError, setIngestError] = useState("");
   const [ingestStatus, setIngestStatus] = useState("");
+  const [snapshotIntervalValue, setSnapshotIntervalValue] = useState(2);
+  const [snapshotIntervalUnit, setSnapshotIntervalUnit] = useState<SnapshotIntervalUnit>("seconds");
   const [pendingVideoReadyStatus, setPendingVideoReadyStatus] = useState("");
   const [videoMetadataLoaded, setVideoMetadataLoaded] = useState(false);
   const [videoAspectRatio, setVideoAspectRatio] = useState(1);
@@ -355,6 +380,8 @@ export default function Home() {
   const [drawColor, setDrawColor] = useState("#ef4444");
   const [textAnnotation, setTextAnnotation] = useState("");
   const [showTranscript, setShowTranscript] = useState(false);
+  const [videoSourceExpanded, setVideoSourceExpanded] = useState(true);
+  const [controlsExpanded, setControlsExpanded] = useState(true);
   const [recordingSpeech, setRecordingSpeech] = useState(false);
   const [transcribingSpeech, setTranscribingSpeech] = useState(false);
   const [speechError, setSpeechError] = useState("");
@@ -370,6 +397,10 @@ export default function Home() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const speechChunksRef = useRef<Blob[]>([]);
   const speechStreamRef = useRef<MediaStream | null>(null);
+  const snapshotIntervalSeconds = Math.min(
+    3600,
+    Math.max(1, snapshotIntervalValue * (snapshotIntervalUnit === "minutes" ? 60 : 1))
+  );
 
   useEffect(() => {
     const savedTheme = window.localStorage.getItem("operatoros-theme");
@@ -382,6 +413,24 @@ export default function Home() {
     setTheme(resolvedTheme);
     document.documentElement.dataset.theme = resolvedTheme;
   }, []);
+
+  useEffect(() => {
+    const videoContent = videoContentRef.current;
+    if (!videoContent) {
+      setVideoDisplayHeight(520);
+      return;
+    }
+
+    const updateVideoDisplayHeight = () => {
+      const nextHeight = Math.round(videoContent.getBoundingClientRect().height);
+      if (nextHeight > 0) setVideoDisplayHeight(Math.max(520, nextHeight));
+    };
+
+    updateVideoDisplayHeight();
+    const resizeObserver = new ResizeObserver(updateVideoDisplayHeight);
+    resizeObserver.observe(videoContent);
+    return () => resizeObserver.disconnect();
+  }, [videoUrl, videoMetadataLoaded, videoAspectRatio]);
 
   useEffect(() => {
     trackingLayersRef.current = trackingLayers;
@@ -469,11 +518,82 @@ export default function Home() {
     if (!video) return;
     const playerTimestamp = Math.max(0, sourceTimestamp - videoTimeOffset);
     video.pause();
-    video.currentTime = playerTimestamp;
+    if (Math.abs(video.currentTime - playerTimestamp) > 0.015) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          video.removeEventListener("seeked", finish);
+          resolve();
+        };
+        video.addEventListener("seeked", finish, { once: true });
+        video.currentTime = playerTimestamp;
+        window.setTimeout(finish, 5000);
+      });
+    }
     setTimestamp(playerTimestamp);
     setIsPaused(true);
     video.scrollIntoView({ behavior: "smooth", block: "center" });
     if (videoId) await loadTranscriptWindow(videoId, sourceTimestamp);
+  }
+
+  async function showTrainingStep(step: TrainingStep) {
+    if (typeof step.timestamp === "number") {
+      await jumpToVideoMoment(step.timestamp);
+    } else {
+      const video = videoRef.current;
+      video?.pause();
+      video?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    setModelAnnotations(
+      step.annotations.map((annotation) => ({
+        ...annotation,
+        fontSize: annotation.fontSize ?? 1,
+        strokeWidth: annotation.strokeWidth ?? 3,
+      }))
+    );
+  }
+
+  async function regenerateTrainingStep(messageId: string, step: TrainingStep, model?: string) {
+    if (typeof step.timestamp !== "number") {
+      throw new Error("This step does not have a selected video frame yet.");
+    }
+    await jumpToVideoMoment(step.timestamp);
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()));
+    });
+    const frameData = await captureFrame();
+    const annotations = await regenerateTrainingAnnotation({
+      frame_data_url: frameData,
+      step_title: step.title,
+      instruction: step.instruction,
+      expected_result: step.expected_result,
+      components: step.components,
+      timestamp: step.timestamp,
+      previous_annotations: step.annotations,
+      model,
+    });
+    if (!annotations.length) throw new Error("No usable annotations were returned.");
+    setChatMessages((current) => current.map((message) => {
+      if (message.id !== messageId || !message.trainingProcedure) return message;
+      return {
+        ...message,
+        trainingProcedure: {
+          ...message.trainingProcedure,
+          steps: message.trainingProcedure.steps.map((candidate) =>
+            candidate.id === step.id
+              ? { ...candidate, annotations, visual_status: "ready", visual_error: "" }
+              : candidate
+          ),
+        },
+      };
+    }));
+    setModelAnnotations(annotations.map((annotation) => ({
+      ...annotation,
+      fontSize: annotation.fontSize ?? 1,
+      strokeWidth: annotation.strokeWidth ?? 3,
+    })));
   }
 
   async function handleTimelineRebuild() {
@@ -481,7 +601,7 @@ export default function Home() {
     setTimelineBusy(true);
     setTimelineError("");
     try {
-      setTimelineStatus(await rebuildTimeline(videoId));
+      setTimelineStatus(await rebuildTimeline(videoId, snapshotIntervalSeconds));
       setTimelineRefresh((value) => value + 1);
     } catch (error) {
       setTimelineError(errorMessage(error));
@@ -651,6 +771,7 @@ export default function Home() {
           return comparisonExportLines(message.comparison);
         }
         const details = [
+          message.mode ? `Mode: ${message.mode === "training" ? "Training" : "Q&A"}` : "",
           message.model ? `Model: ${message.model}` : "",
           message.documents?.length ? `RAG documents: ${message.documents.join(", ")}` : "",
           message.role === "user"
@@ -1101,7 +1222,7 @@ export default function Home() {
     setVideoUrl(objectUrl);
     setOriginalVideoUrl(objectUrl);
     try {
-      const result = await uploadMedia(file);
+      const result = await uploadMedia(file, snapshotIntervalSeconds);
       setVideoId(result.video_id);
       await syncVideoTitle(result.video_id, result.title);
       setPendingVideoReadyStatus("Local video ready.");
@@ -1138,7 +1259,7 @@ export default function Home() {
       "Downloading and preparing the YouTube video. Large downloads and first-run transcription can take several minutes..."
     );
     try {
-      const result = await ingestYoutubeUrl(trimmedUrl);
+      const result = await ingestYoutubeUrl(trimmedUrl, snapshotIntervalSeconds);
       const sourceUrl = getMediaSourceUrl(result.video_id);
       setVideoId(result.video_id);
       await syncVideoTitle(result.video_id, result.title);
@@ -1205,13 +1326,15 @@ export default function Home() {
         createdAt,
         documents: request.documentNames,
         annotatedSnapshot: request.includeAnnotatedSnapshot,
+        mode: request.mode,
       },
       {
         id: assistantMessageId,
         role: "assistant",
-        content: "Thinking...",
+        content: request.mode === "training" ? "Building your guided training..." : "Thinking...",
         createdAt,
         model: request.model,
+        mode: request.mode,
       },
     ]);
 
@@ -1248,6 +1371,7 @@ export default function Home() {
       await readSSE(response, {
         onDelta: (chunk) => {
           rawAssistantText += chunk;
+          if (request.mode === "training") return;
           const partial = partialAnswerFromModelResponse(rawAssistantText);
           if (partial) {
             setChatMessages((prev) =>
@@ -1259,6 +1383,65 @@ export default function Home() {
         },
         onError: (message) => {
           throw new Error(message);
+        },
+        onEvent: (eventType, payload) => {
+          if (request.mode !== "training") return;
+          if (eventType === "training_complete") {
+            rawAssistantText = payload;
+            return;
+          }
+          if (eventType === "training_plan") {
+            const plan = parseModelResponse(payload);
+            setChatMessages((current) => current.map((message) =>
+              message.id === assistantMessageId
+                ? {
+                    ...message,
+                    content: plan.answer || "Your guided training is ready. Visual guidance is being prepared step by step.",
+                    citations: plan.citations,
+                    videoMoments: plan.videoMoments,
+                    trainingProcedure: plan.trainingProcedure,
+                  }
+                : message
+            ));
+            return;
+          }
+          let eventPayload: Record<string, unknown>;
+          try {
+            eventPayload = JSON.parse(payload) as Record<string, unknown>;
+          } catch {
+            return;
+          }
+          const stepId = typeof eventPayload.step_id === "string" ? eventPayload.step_id : "";
+          if (!stepId) return;
+          setChatMessages((current) => current.map((message) => {
+            if (message.id !== assistantMessageId || !message.trainingProcedure) return message;
+            const stepIndex = message.trainingProcedure.steps.findIndex((step) => step.id === stepId);
+            if (stepIndex < 0) return message;
+            let replacement = message.trainingProcedure.steps[stepIndex];
+            if (eventType === "training_step_complete") {
+              replacement = parseTrainingStep(eventPayload.step, stepIndex) ?? replacement;
+            } else if (eventType === "training_step_error") {
+              replacement = {
+                ...replacement,
+                visual_status: "error",
+                visual_error: typeof eventPayload.message === "string" ? eventPayload.message : "Visual guidance failed.",
+              };
+            } else if (eventType === "training_step_progress") {
+              const status = eventPayload.status;
+              replacement = {
+                ...replacement,
+                visual_status: status === "selecting_frame" || status === "generating_annotation"
+                  ? status
+                  : replacement.visual_status,
+                timestamp: typeof eventPayload.timestamp === "number"
+                  ? eventPayload.timestamp
+                  : replacement.timestamp,
+              };
+            }
+            const steps = [...message.trainingProcedure.steps];
+            steps[stepIndex] = replacement;
+            return { ...message, trainingProcedure: { ...message.trainingProcedure, steps } };
+          }));
         },
       });
       const parsed = parseModelResponse(rawAssistantText);
@@ -1278,7 +1461,9 @@ export default function Home() {
             : message
         )
       );
-      if (parsed.annotations.length) {
+      if (request.mode === "training" && parsed.trainingProcedure?.steps.length) {
+        setModelAnnotations([]);
+      } else if (parsed.annotations.length) {
         // Render the model's normalized coordinates without a frontend offset.
         setModelAnnotations(
           parsed.annotations.map((a) => ({
@@ -1711,6 +1896,8 @@ export default function Home() {
   const liveTrackingOverlays = activeTrackingJobs.flatMap((job) => job.liveOverlays);
   const visibleTrackingCount = trackingLayers.filter((layer) => layer.visible).length;
   const totalTrackingCount = trackingLayers.length;
+  const activeSnapshotInterval =
+    timelineStatus?.snapshot_interval_seconds ?? snapshotIntervalSeconds;
 
   return (
     <div className="op-shell">
@@ -1742,7 +1929,31 @@ export default function Home() {
 
       <div className="op-layout">
         <section>
-          <div className="op-card">
+          <div className="op-controls-disclosure op-source-disclosure">
+            <button
+              type="button"
+              className={`op-controls-disclosure-toggle ${videoSourceExpanded ? "expanded" : ""}`}
+              onClick={() => setVideoSourceExpanded((expanded) => !expanded)}
+              aria-expanded={videoSourceExpanded}
+              aria-controls="op-video-source-content"
+            >
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
+                <path
+                  d="m6 3.5 4.5 4.5L6 12.5"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <span>Video source</span>
+            </button>
+            <div
+              id="op-video-source-content"
+              className="op-sidebar-controls-content op-source-disclosure-content"
+              hidden={!videoSourceExpanded}
+            >
+            <div className="op-card">
             <div className="op-upload-row">
               <div>
                 <span className="op-field-label">Local Source</span>
@@ -1792,6 +2003,44 @@ export default function Home() {
                 </button>
               </form>
             </div>
+            <div className="op-snapshot-control">
+              <div>
+                <span className="op-field-label">Whole-video snapshot interval</span>
+                <small>
+                  Use a short interval for brief clips and a longer interval for lengthy videos.
+                </small>
+              </div>
+              <div className="op-snapshot-fields">
+                <input
+                  type="number"
+                  min={snapshotIntervalUnit === "minutes" ? 0.1 : 1}
+                  max={snapshotIntervalUnit === "minutes" ? 60 : 3600}
+                  step={snapshotIntervalUnit === "minutes" ? 0.5 : 1}
+                  value={snapshotIntervalValue}
+                  disabled={ingesting || timelineBusy}
+                  aria-label="Snapshot interval value"
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    setSnapshotIntervalValue(Number.isFinite(value) && value > 0 ? value : 1);
+                  }}
+                />
+                <select
+                  value={snapshotIntervalUnit}
+                  disabled={ingesting || timelineBusy}
+                  aria-label="Snapshot interval unit"
+                  onChange={(event) =>
+                    setSnapshotIntervalUnit(event.target.value as SnapshotIntervalUnit)
+                  }
+                >
+                  <option value="seconds">Seconds</option>
+                  <option value="minutes">Minutes</option>
+                </select>
+              </div>
+              <small className="op-snapshot-example">
+                Current setting: one snapshot every {formatSnapshotInterval(snapshotIntervalSeconds)}. Changes also
+                apply when rebuilding the current index.
+              </small>
+            </div>
             {ingestStatus && (
               <p role="status" className="op-status-text">
                 {ingestStatus}
@@ -1809,6 +2058,8 @@ export default function Home() {
                 )}
               </div>
             )}
+          </div>
+          </div>
           </div>
 
           <AnnotationControls
@@ -1832,147 +2083,102 @@ export default function Home() {
                 <h2 className="op-video-title">{videoTitle}</h2>
               </div>
             ) : null}
-            <div className="op-video-stage">
+            <div className={`op-video-stage ${videoUrl ? "op-video-stage-loaded" : "op-video-stage-empty"}`}>
             {videoUrl ? (
-              <video
-                ref={videoRef}
-                controls
-                crossOrigin="anonymous"
-                src={videoUrl}
-                className="op-video-player"
-                onLoadStart={() => {
-                  setVideoMetadataLoaded(false);
-                }}
-                onLoadedMetadata={() => {
-                  setVideoMetadataLoaded(true);
-                  if (videoRef.current?.videoWidth && videoRef.current.videoHeight) {
-                    setVideoAspectRatio(videoRef.current.videoWidth / videoRef.current.videoHeight);
-                  }
-                  setIngestError("");
-                  if (pendingVideoReadyStatus) {
-                    setIngestStatus(pendingVideoReadyStatus);
+              <div
+                ref={videoContentRef}
+                className="op-video-content"
+                style={{ aspectRatio: videoMetadataLoaded ? videoAspectRatio : 16 / 9 }}
+              >
+                <video
+                  ref={videoRef}
+                  controls
+                  crossOrigin="anonymous"
+                  src={videoUrl}
+                  className="op-video-player"
+                  onLoadStart={() => {
+                    setVideoMetadataLoaded(false);
+                  }}
+                  onLoadedMetadata={() => {
+                    setVideoMetadataLoaded(true);
+                    if (videoRef.current?.videoWidth && videoRef.current.videoHeight) {
+                      setVideoAspectRatio(videoRef.current.videoWidth / videoRef.current.videoHeight);
+                    }
+                    setIngestError("");
+                    if (pendingVideoReadyStatus) {
+                      setIngestStatus(pendingVideoReadyStatus);
+                      setPendingVideoReadyStatus("");
+                    }
+                  }}
+                  onError={() => {
+                    setVideoMetadataLoaded(false);
                     setPendingVideoReadyStatus("");
-                  }
-                }}
-                onError={() => {
-                  setVideoMetadataLoaded(false);
-                  setPendingVideoReadyStatus("");
-                  setIngestStatus("Video source failed to load in the player.");
-                  setIngestError(
-                    `Video player could not load the selected media. ${videoElementErrorMessage(videoRef.current)}`
-                  );
-                }}
-                onPause={async () => {
-                  const nextTs = videoRef.current?.currentTime ?? 0;
-                  setTimestamp(nextTs);
-                  setAnnotations([]);
-                  setModelAnnotations([]);
-                  setAnnotationUndoStack([]);
-                  setIsPaused(true);
-                  if (videoId) {
-                    await loadTranscriptWindow(videoId, nextTs + videoTimeOffset);
-                  }
-                }}
-                onPlay={() => {
-                  setAnnotations([]);
-                  setModelAnnotations([]);
-                  setAnnotationUndoStack([]);
-                  setIsPaused(false);
-                }}
-                onTimeUpdate={() => {
-                  setTimestamp(videoRef.current?.currentTime ?? 0);
-                }}
-              />
+                    setIngestStatus("Video source failed to load in the player.");
+                    setIngestError(
+                      `Video player could not load the selected media. ${videoElementErrorMessage(videoRef.current)}`
+                    );
+                  }}
+                  onPause={async () => {
+                    const nextTs = videoRef.current?.currentTime ?? 0;
+                    setTimestamp(nextTs);
+                    setAnnotations([]);
+                    setModelAnnotations([]);
+                    setAnnotationUndoStack([]);
+                    setIsPaused(true);
+                    if (videoId) {
+                      await loadTranscriptWindow(videoId, nextTs + videoTimeOffset);
+                    }
+                  }}
+                  onPlay={() => {
+                    setAnnotations([]);
+                    setModelAnnotations([]);
+                    setAnnotationUndoStack([]);
+                    setIsPaused(false);
+                  }}
+                  onTimeUpdate={() => {
+                    setTimestamp(videoRef.current?.currentTime ?? 0);
+                  }}
+                />
+                <TrackingOverlayCanvas
+                  enabled={showTrackingOverlays}
+                  layers={trackingLayers}
+                  liveOverlays={liveTrackingOverlays}
+                  videoRef={videoRef}
+                  videoTimeOffset={videoTimeOffset}
+                />
+                <AnnotationOverlay
+                  activeTool={activeTool}
+                  annotations={annotations}
+                  modelAnnotations={modelAnnotations}
+                  drawColor={drawColor}
+                  isPaused={isPaused}
+                  textAnnotation={textAnnotation}
+                  videoAspectRatio={videoAspectRatio}
+                  onAnnotationsChange={setAnnotations}
+                  onPushUndo={(entry) => setAnnotationUndoStack((prev) => [...prev, entry])}
+                />
+              </div>
             ) : (
               <div role="status" className="op-video-placeholder">
                 Upload the video with the menu above and the video media player will appear here
               </div>
             )}
-            {videoUrl && (
-              <TrackingOverlayCanvas
-                enabled={showTrackingOverlays}
-                layers={trackingLayers}
-                liveOverlays={liveTrackingOverlays}
-                videoRef={videoRef}
-                videoTimeOffset={videoTimeOffset}
-              />
-            )}
-            {videoUrl && (
-              <AnnotationOverlay
-                activeTool={activeTool}
-                annotations={annotations}
-                modelAnnotations={modelAnnotations}
-                drawColor={drawColor}
-                isPaused={isPaused}
-                textAnnotation={textAnnotation}
-                videoAspectRatio={videoAspectRatio}
-                onAnnotationsChange={setAnnotations}
-                onPushUndo={(entry) => setAnnotationUndoStack((prev) => [...prev, entry])}
-              />
-            )}
             </div>
           </div>
         </section>
 
-        <aside>
-          <div className="op-card">
-            <div className="op-sidebar-section-header">
-              <h2 className="op-card-title" style={{ margin: 0 }}>
-                Vision &amp; Tracking Engine
-              </h2>
-              <div className="op-inline-actions">
-                <button
-                  type="button"
-                  className="op-secondary-button"
-                  onClick={removeTracking}
-                  disabled={!trackingLayers.length}
-                >
-                  Clear Items
-                </button>
-                <button
-                  type="button"
-                  className="op-secondary-button"
-                  onClick={restoreFullVideo}
-                  disabled={!originalVideoUrl || videoUrl === originalVideoUrl}
-                >
-                  Restore Full Video
-                </button>
-                <button
-                  type="button"
-                  className="op-secondary-button"
-                  onClick={() => setShowTranscript((current) => !current)}
-                >
-                  {showTranscript ? "Hide Transcript" : "Show Transcript"}
-                </button>
-              </div>
-            </div>
-            <label className="op-checkbox-row">
-              <input
-                type="checkbox"
-                checked={trackingEnabled}
-                onChange={(event) => setTrackingEnabled(event.target.checked)}
-              />
-              <span>Automatically use SAM3 Tracking</span>
-            </label>
-            <label className="op-checkbox-row">
-              <input
-                type="checkbox"
-                checked={showTrackingOverlays}
-                onChange={(event) => setShowTrackingOverlays(event.target.checked)}
-              />
-              <span>Show tracking items</span>
-            </label>
-            <label className="op-checkbox-row">
-              <input
-                type="checkbox"
-                checked={sendAnnotatedSnapshot}
-                onChange={(event) => setSendAnnotatedSnapshot(event.target.checked)}
-              />
-              <span>Send Annotated Snapshot</span>
-            </label>
+        <aside
+          className={
+            controlsExpanded
+              ? "op-sidebar op-sidebar-controls-expanded"
+              : "op-sidebar op-sidebar-controls-collapsed"
+          }
+        >
+          <div className="op-card op-tracking-activity-card">
+            <h2 className="op-card-title">Tracking Items</h2>
             <div className="op-tracking-layer-panel">
               <div className="op-tracking-layer-heading">
-                <strong>Tracking Items</strong>
+                <strong>Completed items</strong>
                 <div className="op-inline-actions">
                   <button
                     type="button"
@@ -2173,14 +2379,14 @@ export default function Home() {
                     <strong>Whole-video understanding</strong>
                     <small>
                       {timelineStatus?.state === "ready"
-                        ? "Ready · sampled every 2 seconds"
+                        ? `Ready · sampled every ${formatSnapshotInterval(activeSnapshotInterval)}`
                         : timelineStatus?.state === "partial"
                           ? "Partially ready · transcript search available"
                           : timelineStatus?.state === "cancelled"
                             ? "Cancelled"
                             : timelineStatus?.state === "error"
                               ? "Needs attention"
-                              : "Analyzing 2-second snapshots"}
+                            : `Analyzing snapshots every ${formatSnapshotInterval(activeSnapshotInterval)}`}
                     </small>
                   </div>
                   {timelineStatus && ["prepared", "analyzing", "not_started"].includes(timelineStatus.state) ? (
@@ -2246,7 +2452,88 @@ export default function Home() {
             )}
           </div>
 
-          <div className="op-card">
+          <div className="op-controls-disclosure">
+            <button
+              type="button"
+              className={`op-controls-disclosure-toggle ${controlsExpanded ? "expanded" : ""}`}
+              onClick={() => setControlsExpanded((expanded) => !expanded)}
+              aria-controls="op-sidebar-controls-content"
+              aria-expanded={controlsExpanded}
+            >
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
+                <path
+                  d="M5.5 3.5 10 8l-4.5 4.5"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <span>Controls</span>
+            </button>
+            <div
+              id="op-sidebar-controls-content"
+              className="op-sidebar-controls-content"
+              hidden={!controlsExpanded}
+            >
+          <div id="op-tracking-controls" className="op-card">
+            <div className="op-sidebar-section-header">
+              <h2 className="op-card-title" style={{ margin: 0 }}>
+                Vision &amp; Tracking Engine
+              </h2>
+              <div className="op-inline-actions">
+                <button
+                  type="button"
+                  className="op-secondary-button"
+                  onClick={removeTracking}
+                  disabled={!trackingLayers.length}
+                >
+                  Clear Items
+                </button>
+                <button
+                  type="button"
+                  className="op-secondary-button"
+                  onClick={restoreFullVideo}
+                  disabled={!originalVideoUrl || videoUrl === originalVideoUrl}
+                >
+                  Restore Full Video
+                </button>
+                <button
+                  type="button"
+                  className="op-secondary-button"
+                  onClick={() => setShowTranscript((current) => !current)}
+                >
+                  {showTranscript ? "Hide Transcript" : "Show Transcript"}
+                </button>
+              </div>
+            </div>
+            <label className="op-checkbox-row">
+              <input
+                type="checkbox"
+                checked={trackingEnabled}
+                onChange={(event) => setTrackingEnabled(event.target.checked)}
+              />
+              <span>Automatically use SAM3 Tracking</span>
+            </label>
+            <label className="op-checkbox-row">
+              <input
+                type="checkbox"
+                checked={showTrackingOverlays}
+                onChange={(event) => setShowTrackingOverlays(event.target.checked)}
+              />
+              <span>Show tracking items</span>
+            </label>
+            <label className="op-checkbox-row">
+              <input
+                type="checkbox"
+                checked={sendAnnotatedSnapshot}
+                onChange={(event) => setSendAnnotatedSnapshot(event.target.checked)}
+              />
+              <span>Send Annotated Snapshot</span>
+            </label>
+          </div>
+
+          <div id="op-document-controls" className="op-card">
             <h2 className="op-card-title">Direct PDF Documents</h2>
             <input
               id="document-upload"
@@ -2301,7 +2588,10 @@ export default function Home() {
             </p>
           </div>
 
-          <div className="op-card">
+          <div
+            id="op-notes-controls"
+            className="op-card"
+          >
             <h2 className="op-card-title">Additional Notes</h2>
             <textarea
               id="additional-notes"
@@ -2314,7 +2604,10 @@ export default function Home() {
             <p className="op-help-text">These notes are included with every new message.</p>
           </div>
 
-          <div className="op-card">
+          <div
+            id="op-model-controls"
+            className="op-card"
+          >
             <h2 className="op-card-title">Vision Language Model (VLM)</h2>
             <select
               className="op-select"
@@ -2330,8 +2623,13 @@ export default function Home() {
             </select>
             <p className="op-help-text">Active model: {selectedModelLabel}</p>
           </div>
+          </div>
+          </div>
 
-          <div className="op-card">
+          <div
+            className="op-card op-conversation-card"
+            style={{ height: `${videoDisplayHeight}px` }}
+          >
             <div className="op-card-heading">
               <h2 className="op-card-title">Conversation</h2>
               <div className="op-inline-actions">
@@ -2432,41 +2730,55 @@ export default function Home() {
                             : message.error
                               ? "op-chat-bubble-error"
                               : "op-chat-bubble-assistant"
-                        }`}
+                        } ${message.trainingProcedure?.steps.length ? "op-chat-bubble-training" : ""}`}
                       >
                         <div className="op-chat-meta">
-                          {message.role === "user" ? "User" : "Operator OS"}
-                          {message.model ? ` · ${message.model}` : ""}
-                          {message.documents?.length ? ` · PDF: ${message.documents.join(", ")}` : ""}
+                          <span>{message.role === "user" ? "User" : "Operator OS"}</span>
+                          {message.mode && (
+                            <span className={`op-chat-mode-badge op-chat-mode-${message.mode}`}>
+                              {message.mode === "training" ? "Training mode" : "Q&A mode"}
+                            </span>
+                          )}
+                          {message.model ? <span>· {message.model}</span> : null}
+                          {message.documents?.length ? (
+                            <span>· PDF: {message.documents.join(", ")}</span>
+                          ) : null}
                           {message.role === "user"
-                            ? ` · snapshot ${message.annotatedSnapshot ? "sent" : "not sent"}`
-                            : ""}
+                            ? <span>· snapshot {message.annotatedSnapshot ? "sent" : "not sent"}</span>
+                            : null}
                         </div>
                         {message.cancelled && <div className="op-chat-stopped">Response stopped</div>}
-                        <div className="op-chat-content">{formatAnswerText(message.content)}</div>
-                        {message.role === "assistant" && !message.error && message.content !== "Thinking..." && (
-                          <button
-                            type="button"
-                            className="op-speak-button"
-                            onClick={() => speakMessage(message)}
-                            aria-label={speakingMessageId === message.id ? "Stop reading response" : "Read response aloud"}
-                          >
-                            {speakingMessageId === message.id ? "Stop audio" : "Read aloud"}
-                          </button>
-                        )}
-                        {message.role === "assistant" && message.videoMoments ? (
-                          <VideoMoments moments={message.videoMoments} onSeek={(value) => void jumpToVideoMoment(value)} />
-                        ) : null}
-                        {message.role === "assistant" && message.citations ? (
-                          <DocumentCitations citations={message.citations} />
-                        ) : null}
                         {message.role === "assistant" && message.trainingProcedure?.steps.length ? (
                           <TrainingProcedureCard
                             procedure={message.trainingProcedure}
                             storageKey={`operatoros-training:${videoId}:${message.id}`}
-                            onSeek={(value) => void jumpToVideoMoment(value)}
+                            onShowStep={(step) => void showTrainingStep(step)}
+                            onRegenerateStep={(step) => regenerateTrainingStep(message.id, step, message.model)}
                           />
-                        ) : null}
+                        ) : (
+                          <>
+                            <div className="op-chat-content">{formatAnswerText(message.content)}</div>
+                            {message.role === "assistant" &&
+                              !message.error &&
+                              message.content !== "Thinking..." &&
+                              message.content !== "Building your guided training..." && (
+                                <button
+                                  type="button"
+                                  className="op-speak-button"
+                                  onClick={() => speakMessage(message)}
+                                  aria-label={speakingMessageId === message.id ? "Stop reading response" : "Read response aloud"}
+                                >
+                                  {speakingMessageId === message.id ? "Stop audio" : "Read aloud"}
+                                </button>
+                              )}
+                            {message.role === "assistant" && message.videoMoments ? (
+                              <VideoMoments moments={message.videoMoments} onSeek={(value) => void jumpToVideoMoment(value)} />
+                            ) : null}
+                            {message.role === "assistant" && message.citations ? (
+                              <DocumentCitations citations={message.citations} />
+                            ) : null}
+                          </>
+                        )}
                       </div>
                     )
                   )

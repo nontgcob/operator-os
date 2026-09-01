@@ -40,8 +40,10 @@ export function DocumentCitations({ citations }: { citations: DocumentCitation[]
               </a>
               {citation.excerpt ? <blockquote>{citation.excerpt}</blockquote> : null}
               {previewing ? (
-                <div className="op-citation-preview" role="dialog" aria-label={`Preview ${citation.filename}`}>
-                  <iframe title={`Preview ${citationLabel(citation)}`} src={sourceUrl} />
+                <div className="op-citation-preview" role="tooltip">
+                  <strong>{citationLabel(citation)}</strong>
+                  <p>{citation.excerpt || "No supporting excerpt was provided for this citation."}</p>
+                  <small>Click the source to open the cited page.</small>
                 </div>
               ) : null}
             </li>

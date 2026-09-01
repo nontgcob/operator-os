@@ -71,7 +71,7 @@ function parseVideoMoments(value: unknown): VideoMoment[] {
   });
 }
 
-function parseTrainingStep(value: unknown, index: number): TrainingStep | null {
+export function parseTrainingStep(value: unknown, index: number): TrainingStep | null {
   if (!value || typeof value !== "object") return null;
   const step = value as Record<string, unknown>;
   const title = cleanString(step.title);
@@ -90,6 +90,11 @@ function parseTrainingStep(value: unknown, index: number): TrainingStep | null {
     section: cleanString(step.section),
     components: parseStringArray(step.components),
     warnings: parseStringArray(step.warnings),
+    annotations: parseAnnotationArray(step.annotations),
+    visual_status: new Set(["pending", "selecting_frame", "generating_annotation", "ready", "error"]).has(String(step.visual_status))
+      ? String(step.visual_status) as TrainingStep["visual_status"]
+      : parseAnnotationArray(step.annotations).length ? "ready" : "pending",
+    visual_error: cleanString(step.visual_error),
   };
 }
 
@@ -174,19 +179,47 @@ function normalizeModelAnnotation(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   const candidate = value as Record<string, unknown>;
   const color = typeof candidate.color === "string" ? candidate.color : "#8b5cf6";
+  const text = typeof candidate.text === "string"
+    ? candidate.text
+    : typeof candidate.label === "string"
+      ? candidate.label
+      : undefined;
   const coordinates = Array.isArray(candidate.coordinates) ? candidate.coordinates : null;
   if (candidate.type === "rect" && coordinates?.length === 4 && coordinates.every(isFiniteNumber)) {
     const [x1, y1, x2, y2] = coordinates as number[];
-    return { ...candidate, color, x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+    return { ...candidate, color, text, x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
   }
   if (candidate.type === "arrow" && coordinates?.length === 4 && coordinates.every(isFiniteNumber)) {
     const [x1, y1, x2, y2] = coordinates as number[];
-    return { ...candidate, color, x1, y1, x2, y2 };
+    return { ...candidate, color, text, x1, y1, x2, y2 };
   }
-  const box = Array.isArray(candidate.box_2d) ? candidate.box_2d : null;
+  const box = Array.isArray(candidate.box) ? candidate.box : null;
   if (candidate.type === "rect" && box?.length === 4 && box.every(isFiniteNumber)) {
     const [y1, x1, y2, x2] = box as number[];
-    return { ...candidate, color, x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+    return { ...candidate, color, text, x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+  }
+  const start = Array.isArray(candidate.start) ? candidate.start : null;
+  const end = Array.isArray(candidate.end) ? candidate.end : null;
+  if (
+    candidate.type === "arrow" &&
+    start?.length === 2 &&
+    end?.length === 2 &&
+    [...start, ...end].every(isFiniteNumber)
+  ) {
+    return {
+      ...candidate,
+      color,
+      text,
+      x1: start[0],
+      y1: start[1],
+      x2: end[0],
+      y2: end[1],
+    };
+  }
+  const box2d = Array.isArray(candidate.box_2d) ? candidate.box_2d : null;
+  if (candidate.type === "rect" && box2d?.length === 4 && box2d.every(isFiniteNumber)) {
+    const [y1, x1, y2, x2] = box2d as number[];
+    return { ...candidate, color, text, x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
   }
   if (
     candidate.type === "rect" &&
@@ -197,13 +230,14 @@ function normalizeModelAnnotation(value: unknown): unknown {
     return {
       ...candidate,
       color,
+      text,
       x: x1,
       y: y1,
       width: (candidate.x_max as number) - x1,
       height: (candidate.y_max as number) - y1,
     };
   }
-  return { ...candidate, color };
+  return { ...candidate, color, text };
 }
 
 function isValidAnnotation(annotation: unknown): annotation is Annotation {
@@ -253,7 +287,7 @@ function isValidAnnotation(annotation: unknown): annotation is Annotation {
   }
 }
 
-function parseAnnotationArray(value: unknown): Annotation[] {
+export function parseAnnotationArray(value: unknown): Annotation[] {
   if (!Array.isArray(value)) return [];
   return value.map(normalizeModelAnnotation).filter(isValidAnnotation);
 }

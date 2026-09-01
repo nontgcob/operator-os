@@ -140,7 +140,14 @@ def build_timeline(
     }
     _atomic_json(index_path(video_dir), payload)
     _write_search_index(video_dir, payload)
-    write_status(video_dir, state="prepared", progress=10, error=None, segment_count=len(segments))
+    write_status(
+        video_dir,
+        state="prepared",
+        progress=10,
+        error=None,
+        segment_count=len(segments),
+        snapshot_interval_seconds=segment_seconds,
+    )
     return payload
 
 

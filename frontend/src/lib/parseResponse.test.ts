@@ -94,6 +94,11 @@ describe("parseModelResponse", () => {
           page: 12,
           components: ["stop button"],
           warnings: [],
+          annotations: [{
+            type: "rect",
+            coordinates: [120, 180, 260, 320],
+            color: "#22c55e",
+          }],
         }],
       },
     }));
@@ -101,6 +106,13 @@ describe("parseModelResponse", () => {
     expect(parsed.citations[0]).toMatchObject({ filename: "manual.pdf", page: 12 });
     expect(parsed.videoMoments[0]).toMatchObject({ timestamp: 8, label: "Stop button" });
     expect(parsed.trainingProcedure?.steps[0]).toMatchObject({ id: "step-1", timestamp: 8 });
+    expect(parsed.trainingProcedure?.steps[0].annotations[0]).toMatchObject({
+      type: "rect",
+      x: 120,
+      y: 180,
+      width: 140,
+      height: 140,
+    });
   });
 
   it("repairs a stray bare token without exposing raw JSON", () => {
@@ -129,6 +141,50 @@ describe("parseModelResponse", () => {
     expect(parsed.annotations).toEqual([
       expect.objectContaining({ type: "rect", x: 100, y: 200, width: 250, height: 300 }),
       expect.objectContaining({ type: "arrow", x1: 10, y1: 20, x2: 30, y2: 40 }),
+    ]);
+  });
+
+  it("normalizes Gemini training boxes, labels, and arrow endpoints", () => {
+    const parsed = parseModelResponse(JSON.stringify({
+      answer: "Training ready.",
+      annotations: [],
+      tracking_prompt: "",
+      tracking_annotations: [],
+      tracking_targets: [],
+      citations: [],
+      video_moments: [],
+      training_procedure: {
+        title: "Machine operation",
+        steps: [{
+          id: "step-1",
+          title: "Move the lever",
+          instruction: "Pull the lever down.",
+          timestamp: 2,
+          annotations: [
+            { type: "rect", box: [10, 200, 310, 260], label: "Lever handle", color: "#3B82F6" },
+            { type: "arrow", start: [230, 40], end: [230, 280], label: "Pull down", color: "#EF4444" },
+          ],
+        }],
+      },
+    }));
+
+    expect(parsed.trainingProcedure?.steps[0].annotations).toEqual([
+      expect.objectContaining({
+        type: "rect",
+        x: 200,
+        y: 10,
+        width: 60,
+        height: 300,
+        text: "Lever handle",
+      }),
+      expect.objectContaining({
+        type: "arrow",
+        x1: 230,
+        y1: 40,
+        x2: 230,
+        y2: 280,
+        text: "Pull down",
+      }),
     ]);
   });
 });

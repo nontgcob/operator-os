@@ -54,7 +54,11 @@ def test_media_ingest_accepts_youtube_json(monkeypatch) -> None:
     monkeypatch.setattr(module.httpx, "AsyncClient", _FakeAsyncClient)
     client = TestClient(module.app)
 
-    response = client.post("/media/ingest", json={"youtube_url": "https://youtu.be/example"})
+    response = client.post(
+        "/media/ingest",
+        params={"snapshot_interval_seconds": 120},
+        json={"youtube_url": "https://youtu.be/example"},
+    )
 
     assert response.status_code == 200
     assert response.json() == {"video_id": "video-1"}
@@ -62,6 +66,7 @@ def test_media_ingest_accepts_youtube_json(monkeypatch) -> None:
         {
             "url": f"{module.VIDEO_SERVICE_URL}/media/ingest",
             "json": {"youtube_url": "https://youtu.be/example"},
+            "params": {"snapshot_interval_seconds": 120.0},
         }
     ]
 
@@ -81,6 +86,22 @@ def test_media_ingest_preserves_file_upload(monkeypatch) -> None:
     request = _FakeAsyncClient.instances[0].requests[0]
     assert request["url"] == f"{module.VIDEO_SERVICE_URL}/media/ingest"
     assert request["files"]["file"] == ("clip.mp4", b"fake mp4", "video/mp4")
+    assert request["params"] == {"snapshot_interval_seconds": 2.0}
+
+
+def test_media_ingest_rejects_out_of_range_snapshot_interval(monkeypatch) -> None:
+    module = _load_orchestrator_module()
+    monkeypatch.setattr(module.httpx, "AsyncClient", _FakeAsyncClient)
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/media/ingest",
+        params={"snapshot_interval_seconds": 0},
+        json={"youtube_url": "https://youtu.be/example"},
+    )
+
+    assert response.status_code == 422
+    assert "between 1 and 3600" in response.json()["detail"]
 
 
 def test_media_ingest_uses_configured_timeout(monkeypatch) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -151,11 +152,13 @@ def _write_video_metadata(
     title: str,
     source: str,
     source_label: str | None = None,
-) -> dict[str, str]:
+    snapshot_interval_seconds: float = VIDEO_INDEX_SEGMENT_SECONDS,
+) -> dict[str, Any]:
     metadata = {
         "video_id": video_id,
         "title": title.strip() or "Untitled video",
         "source": source,
+        "snapshot_interval_seconds": snapshot_interval_seconds,
     }
     if source_label:
         metadata["source_label"] = source_label
@@ -163,7 +166,7 @@ def _write_video_metadata(
     return metadata
 
 
-def _read_video_metadata(video_id: str) -> dict[str, str] | None:
+def _read_video_metadata(video_id: str) -> dict[str, Any] | None:
     path = _metadata_path(video_id)
     if not path.exists():
         return None
@@ -171,6 +174,29 @@ def _read_video_metadata(video_id: str) -> dict[str, str] | None:
     if not isinstance(payload, dict):
         return None
     return payload
+
+
+def _validated_snapshot_interval(value: float) -> float:
+    interval = float(value)
+    if not math.isfinite(interval) or interval < 1 or interval > 3600:
+        raise HTTPException(status_code=422, detail="snapshot_interval_seconds must be between 1 and 3600")
+    return interval
+
+
+def _stored_snapshot_interval(video_id: str) -> float:
+    metadata = _read_video_metadata(video_id) or {}
+    try:
+        return _validated_snapshot_interval(float(metadata.get("snapshot_interval_seconds", VIDEO_INDEX_SEGMENT_SECONDS)))
+    except (TypeError, ValueError, HTTPException):
+        return VIDEO_INDEX_SEGMENT_SECONDS
+
+
+def _store_snapshot_interval(video_id: str, interval: float) -> None:
+    metadata = _read_video_metadata(video_id)
+    if not metadata:
+        return
+    metadata["snapshot_interval_seconds"] = interval
+    _metadata_path(video_id).write_text(json.dumps(metadata), encoding="utf-8")
 
 
 def _load_whisper_model() -> Any:
@@ -294,9 +320,16 @@ def _extract_transcript(video_id: str, video_path: Path) -> list[dict[str, float
     return segments
 
 
-def _extract_frames(video_id: str, video_path: Path) -> list[dict[str, str | float]]:
+def _extract_frames(
+    video_id: str,
+    video_path: Path,
+    snapshot_interval_seconds: float = VIDEO_INDEX_SEGMENT_SECONDS,
+) -> list[dict[str, str | float]]:
+    snapshot_interval_seconds = _validated_snapshot_interval(snapshot_interval_seconds)
     frame_dir = _video_dir(video_id) / "frames"
     frame_dir.mkdir(parents=True, exist_ok=True)
+    for existing_frame in frame_dir.glob("frame_*.jpg"):
+        existing_frame.unlink(missing_ok=True)
     subprocess.run(
         [
             "ffmpeg",
@@ -304,7 +337,7 @@ def _extract_frames(video_id: str, video_path: Path) -> list[dict[str, str | flo
             "-i",
             str(video_path),
             "-vf",
-            "fps=1",
+            f"fps=1/{snapshot_interval_seconds:g}",
             str(frame_dir / "frame_%05d.jpg"),
         ],
         capture_output=True,
@@ -313,7 +346,7 @@ def _extract_frames(video_id: str, video_path: Path) -> list[dict[str, str | flo
     )
     index: list[dict[str, str | float]] = []
     for idx, frame in enumerate(sorted(frame_dir.glob("frame_*.jpg"))):
-        index.append({"timestamp": float(idx), "path": str(frame)})
+        index.append({"timestamp": round(idx * snapshot_interval_seconds, 3), "path": str(frame)})
     _frame_index_path(video_id).write_text(json.dumps(index), encoding="utf-8")
     return index
 
@@ -334,13 +367,18 @@ def _load_frame_index(video_id: str) -> list[dict[str, Any]]:
     return payload if isinstance(payload, list) else []
 
 
-def _prepare_timeline(video_id: str, transcript: list[dict[str, Any]], frames: list[dict[str, Any]]) -> None:
+def _prepare_timeline(
+    video_id: str,
+    transcript: list[dict[str, Any]],
+    frames: list[dict[str, Any]],
+    snapshot_interval_seconds: float = VIDEO_INDEX_SEGMENT_SECONDS,
+) -> None:
     build_timeline(
         video_id=video_id,
         video_dir=_video_dir(video_id),
         transcript=transcript,
         frames=frames,
-        segment_seconds=VIDEO_INDEX_SEGMENT_SECONDS,
+        segment_seconds=snapshot_interval_seconds,
     )
 
 
@@ -859,9 +897,11 @@ async def ingest_media(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(default=None),
     youtube_url: str | None = Form(default=None),
+    snapshot_interval_seconds: float = VIDEO_INDEX_SEGMENT_SECONDS,
 ):
     video_id = str(uuid4())
     youtube_url = await _youtube_url_from_request(request, youtube_url)
+    snapshot_interval_seconds = _validated_snapshot_interval(snapshot_interval_seconds)
     title = "Untitled video"
     source = "unknown"
     source_label: str | None = None
@@ -896,8 +936,8 @@ async def ingest_media(
         raise HTTPException(status_code=400, detail="No input media provided")
 
     transcript = _extract_transcript(video_id, source_path)
-    frames = _extract_frames(video_id, source_path)
-    _prepare_timeline(video_id, transcript, frames)
+    frames = _extract_frames(video_id, source_path, snapshot_interval_seconds)
+    _prepare_timeline(video_id, transcript, frames, snapshot_interval_seconds)
     if frames:
         _schedule_timeline_enrichment(background_tasks, video_id)
     metadata = _write_video_metadata(
@@ -905,12 +945,18 @@ async def ingest_media(
         title=title,
         source=source,
         source_label=source_label,
+        snapshot_interval_seconds=snapshot_interval_seconds,
     )
-    return {"video_id": video_id, "title": metadata["title"], "source": metadata["source"]}
+    return {
+        "video_id": video_id,
+        "title": metadata["title"],
+        "source": metadata["source"],
+        "snapshot_interval_seconds": snapshot_interval_seconds,
+    }
 
 
 @app.get("/media/metadata")
-async def media_metadata(video_id: str) -> dict[str, str]:
+async def media_metadata(video_id: str) -> dict[str, Any]:
     metadata = _read_video_metadata(video_id)
     if metadata:
         return metadata
@@ -1060,9 +1106,10 @@ def _ensure_timeline(video_id: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="Video not found") from None
         transcript = _load_transcript(video_id)
         frames = _load_frame_index(video_id)
+        snapshot_interval_seconds = _stored_snapshot_interval(video_id)
         if not frames:
-            frames = _extract_frames(video_id, _source_path(video_id))
-        _prepare_timeline(video_id, transcript, frames)
+            frames = _extract_frames(video_id, _source_path(video_id), snapshot_interval_seconds)
+        _prepare_timeline(video_id, transcript, frames, snapshot_interval_seconds)
         return load_timeline(video_dir)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=500, detail=f"Timeline index is unavailable: {exc}") from exc
@@ -1079,16 +1126,30 @@ async def video_timeline_status(video_id: str, background_tasks: BackgroundTasks
 
 
 @app.post("/video/timeline/rebuild")
-async def rebuild_video_timeline(video_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+async def rebuild_video_timeline(
+    video_id: str,
+    background_tasks: BackgroundTasks,
+    snapshot_interval_seconds: float | None = None,
+) -> dict[str, Any]:
     if not _source_path(video_id).is_file():
         raise HTTPException(status_code=404, detail="Video not found")
+    interval = (
+        _validated_snapshot_interval(snapshot_interval_seconds)
+        if snapshot_interval_seconds is not None
+        else _stored_snapshot_interval(video_id)
+    )
     transcript = _load_transcript(video_id)
-    frames = _load_frame_index(video_id)
-    if not frames:
-        frames = _extract_frames(video_id, _source_path(video_id))
-    _prepare_timeline(video_id, transcript, frames)
+    frames = _extract_frames(video_id, _source_path(video_id), interval)
+    _store_snapshot_interval(video_id, interval)
+    _prepare_timeline(video_id, transcript, frames, interval)
     _schedule_timeline_enrichment(background_tasks, video_id)
-    return {"video_id": video_id, "state": "prepared", "progress": 10, "model": VIDEO_INDEX_MODEL}
+    return {
+        "video_id": video_id,
+        "state": "prepared",
+        "progress": 10,
+        "model": VIDEO_INDEX_MODEL,
+        "snapshot_interval_seconds": interval,
+    }
 
 
 @app.post("/video/timeline/cancel")

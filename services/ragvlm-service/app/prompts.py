@@ -45,7 +45,16 @@ ANNOTATION QUALITY RULES:
 - Never create a document citation for model knowledge, video evidence, or transcript evidence. If no document claim is used, return an empty `citations` array.
 - Put relevant whole-video locations in `video_moments` using `{"timestamp": number, "end_timestamp": number|null, "label": string, "reason": string, "source": "video_index|transcript|tracking|annotation", "confidence": "high|medium|low"}`.
 - In Q&A mode, return `training_procedure` as null.
-- In Training mode, return `training_procedure` as `{"title": string, "objective": string, "prerequisites": [string], "materials": [string], "safety_warnings": [string], "manual_verified": boolean, "steps": [{"id": string, "title": string, "instruction": string, "expected_result": string, "timestamp": number|null, "end_timestamp": number|null, "document_id": string, "filename": string, "page": number|null, "section": string, "components": [string], "warnings": [string]}]}`.
+- In Training mode, return `training_procedure` as `{"title": string, "objective": string, "prerequisites": [string], "materials": [string], "safety_warnings": [string], "manual_verified": boolean, "steps": [{"id": string, "title": string, "instruction": string, "expected_result": string, "timestamp": null, "end_timestamp": null, "document_id": string, "filename": string, "page": number|null, "section": string, "components": [string], "warnings": [string], "annotations": []}]}`.
+- The Training response is a procedure plan only. Return null timestamps and empty annotations for every step; OperatorOS selects and annotates one exact indexed frame per step afterward.
+- Training annotations must identify the exact physical part the learner must touch, move, insert, remove, inspect, or align in that step. Never draw one large box around the whole machine when the instruction names a smaller component such as a handle, button, port, cup, tube, cover, or opening.
+- Add a short `text` label to every Training annotation naming its precise target, such as `Lever handle`, `Cup opening`, or `Power switch`, even when the annotation type is rect, polygon, circle, or arrow.
+- Use ONLY these canonical geometry fields for Training annotations: rect `{"type":"rect","x":number,"y":number,"width":number,"height":number,"text":string,"color":string}`; arrow `{"type":"arrow","x1":number,"y1":number,"x2":number,"y2":number,"text":string,"color":string}`; polygon `{"type":"polygon","points":[{"x":number,"y":number}],"text":string,"color":string}`; circle `{"type":"circle","cx":number,"cy":number,"r":number,"text":string,"color":string}`.
+- Do not use `box`, `box_2d`, `coordinates`, `label`, `start`, or `end` fields in Training annotations. Convert them to the canonical fields above before returning JSON.
+- Use one tight rect, polygon, or circle per distinct target. For movement instructions, also use an arrow whose endpoint lands on the exact moving component and whose direction matches the required motion.
+- Keep tight target boxes within roughly 2-4% visual padding around the visible part. Do not include unrelated machine body, tabletop, hands, cables, or neighboring components.
+- Do not reuse identical geometry across steps unless those steps truly use the same target in the same evidence frame. Re-check every step independently.
+- If a candidate frame is unclear, use a clearer supplied evidence frame and its exact timestamp. Do not guess coordinates on an unsupported frame.
 """
 
 RAG_SYSTEM_PROMPT = """You are a patient machine-manual tutor. The user uploads manufacturing equipment manuals and asks how to operate, maintain, or troubleshoot their machine.
@@ -81,6 +90,75 @@ def _format_annotations(annotations: list[dict[str, Any]] | str) -> str:
     return json.dumps(annotations, ensure_ascii=False, indent=2)
 
 
+def build_training_annotation_prompt(
+    *,
+    step_title: str,
+    instruction: str,
+    expected_result: str,
+    components: list[str],
+    timestamp: float,
+    previous_annotations: list[dict[str, Any]],
+) -> str:
+    return f"""You are regenerating visual guidance for exactly one OperatorOS training step.
+
+The attached image is the exact video frame at {timestamp:.3f} seconds. Inspect this image directly and return ONLY valid JSON as {{"annotations":[annotation objects]}}.
+
+Training step title: {step_title}
+Instruction: {instruction}
+Expected result: {expected_result or "Not specified"}
+Named components: {json.dumps(components, ensure_ascii=False)}
+Previous annotations rejected by the user: {json.dumps(previous_annotations, ensure_ascii=False)}
+
+MANDATORY LOCALIZATION RULES:
+- Return at least one annotation. Do not return an empty array.
+- Identify the exact physical part the learner must touch, move, insert, remove, inspect, or align for this instruction.
+- Never box the whole machine when a smaller actionable component is visible.
+- Reinspect the pixels independently. Do not copy the previous geometry merely because it was provided.
+- Use one tight shape per distinct target, with roughly 2-4% visual padding and no unrelated chassis, table, hand, cable, or neighboring object.
+- If motion is required, include both a tight shape around the moving part and an arrow showing the correct direction. The arrow endpoint must land on that part.
+- Every annotation must include a short `text` label naming its target.
+- All coordinates use the image-wide normalized 0-1000 space: top-left (0,0), bottom-right (1000,1000).
+- Use ONLY canonical geometry:
+  - rect: {{"type":"rect","x":number,"y":number,"width":number,"height":number,"text":string,"color":string}}
+  - arrow: {{"type":"arrow","x1":number,"y1":number,"x2":number,"y2":number,"text":string,"color":string}}
+  - polygon: {{"type":"polygon","points":[{{"x":number,"y":number}}],"text":string,"color":string}}
+  - circle: {{"type":"circle","cx":number,"cy":number,"r":number,"text":string,"color":string}}
+- Do not use `box`, `box_2d`, `coordinates`, `label`, `start`, or `end` fields.
+
+Before answering, verify that every coordinate is within 0-1000 and that each shape tightly encloses the named actionable target rather than the machine as a whole."""
+
+
+def build_training_frame_selection_prompt(
+    *,
+    step_title: str,
+    instruction: str,
+    expected_result: str,
+    components: list[str],
+    candidates: list[dict[str, Any]],
+) -> str:
+    return f"""Select exactly one indexed video frame for one OperatorOS training step.
+
+This is a text-only frame-selection task. You are not drawing annotations and no images are attached. Choose the candidate whose metadata most clearly indicates that the actionable components and the required machine state are visible.
+
+Training step title: {step_title}
+Instruction: {instruction}
+Expected result: {expected_result or "Not specified"}
+Named components: {json.dumps(components, ensure_ascii=False)}
+
+Candidate frames:
+{json.dumps(candidates, ensure_ascii=False, indent=2)}
+
+Return ONLY valid JSON as {{"candidate_id":string,"reason":string}}.
+
+SELECTION RULES:
+- `candidate_id` must exactly match one candidate supplied above.
+- Prefer a frame where the specific part being touched, moved, inserted, removed, inspected, or aligned is visible and minimally occluded.
+- Match the state required by the step: before-action setup steps need the pre-action state; result-verification steps need the post-action state.
+- Prefer a close, clear view over a distant or ambiguous view.
+- Do not select a frame merely because the whole machine is visible when the actionable subcomponent is not clear.
+- Do not invent timestamps or candidate IDs."""
+
+
 def build_prompt(
     question: str,
     annotations: list[dict[str, Any]] | str,
@@ -111,8 +189,14 @@ def build_prompt(
     ]
     mode_requirements = (
         "Generate a complete, ordered training procedure grounded in the supplied manual and whole-video evidence. "
-        "Prefer formal manual instructions for safety, link supported steps to exact pages and timestamps, identify "
-        "conflicts or missing evidence, and set manual_verified=false when no selected manual supports the procedure."
+        "Prefer formal manual instructions for safety, link supported steps to exact document pages, identify "
+        "conflicts or missing evidence, and set manual_verified=false when no selected manual supports the procedure. "
+        "Keep the answer field to a short welcome and objective only; do not enumerate or repeat the procedure steps "
+        "there because the interface reveals training_procedure one step at a time. This request creates the procedure "
+        "plan only. For every step, return timestamp=null, end_timestamp=null, and annotations=[]. Do not select frames "
+        "or estimate coordinates here. OperatorOS will run a separate text-only frame-selection request and then a "
+        "single-frame annotation request for each step. Make every step instruction and components list concrete and "
+        "visually actionable so those later requests can identify exactly what must be shown."
         if mode == "training"
         else "Answer the question directly. Use whole-video evidence only when it improves the answer, and return training_procedure as null."
     )
@@ -147,4 +231,10 @@ def build_prompt(
         "- Use exact page numbers when available; otherwise provide the narrowest identifiable section and leave page null.\n"
         "- Use `video_moments` for relevant source timestamps so the interface can provide clickable seeking.\n"
         "- When relevant, mention the annotated region using the normalized coordinate frame."
+        + (
+            "\n- TRAINING PLAN CHECK: every step has a stable unique id, a concrete action, precise component names, and supporting document fields when available.\n"
+            "- TRAINING PLAN CHECK: every step returns timestamp=null, end_timestamp=null, and annotations=[]; visual grounding happens later per step."
+            if mode == "training"
+            else ""
+        )
     )

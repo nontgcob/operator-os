@@ -56,15 +56,21 @@ export async function getVideoMetadata(videoId: string): Promise<VideoMetadataRe
   return response.json();
 }
 
-export async function uploadMedia(file: File): Promise<MediaIngestResponse> {
+export async function uploadMedia(
+  file: File,
+  snapshotIntervalSeconds = 2
+): Promise<MediaIngestResponse> {
   const formData = new FormData();
   formData.append("file", file);
   let response: Response;
   try {
-    response = await fetch(`${BASE_URL}/media/ingest`, {
-      method: "POST",
-      body: formData,
-    });
+    response = await fetch(
+      `${BASE_URL}/media/ingest?snapshot_interval_seconds=${encodeURIComponent(snapshotIntervalSeconds)}`,
+      {
+        method: "POST",
+        body: formData,
+      }
+    );
   } catch (error) {
     throw mediaIngestNetworkError(error);
   }
@@ -74,14 +80,20 @@ export async function uploadMedia(file: File): Promise<MediaIngestResponse> {
   return response.json();
 }
 
-export async function ingestYoutubeUrl(youtubeUrl: string): Promise<MediaIngestResponse> {
+export async function ingestYoutubeUrl(
+  youtubeUrl: string,
+  snapshotIntervalSeconds = 2
+): Promise<MediaIngestResponse> {
   let response: Response;
   try {
-    response = await fetch(`${BASE_URL}/media/ingest`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ youtube_url: youtubeUrl }),
-    });
+    response = await fetch(
+      `${BASE_URL}/media/ingest?snapshot_interval_seconds=${encodeURIComponent(snapshotIntervalSeconds)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ youtube_url: youtubeUrl }),
+      }
+    );
   } catch (error) {
     throw mediaIngestNetworkError(error);
   }
@@ -131,9 +143,16 @@ export async function getTimelineStatus(videoId: string): Promise<TimelineStatus
   return response.json();
 }
 
-export async function rebuildTimeline(videoId: string): Promise<TimelineStatusResponse> {
+export async function rebuildTimeline(
+  videoId: string,
+  snapshotIntervalSeconds?: number
+): Promise<TimelineStatusResponse> {
+  const params = new URLSearchParams({ video_id: videoId });
+  if (snapshotIntervalSeconds !== undefined) {
+    params.set("snapshot_interval_seconds", String(snapshotIntervalSeconds));
+  }
   const response = await fetch(
-    `${BASE_URL}/video/timeline/rebuild?video_id=${encodeURIComponent(videoId)}`,
+    `${BASE_URL}/video/timeline/rebuild?${params.toString()}`,
     { method: "POST" }
   );
   if (!response.ok) throw new Error(await readApiError(response));
@@ -206,6 +225,26 @@ export async function askQuestion(input: {
     body: JSON.stringify(input),
     signal,
   });
+}
+
+export async function regenerateTrainingAnnotation(input: {
+  frame_data_url: string;
+  step_title: string;
+  instruction: string;
+  expected_result?: string;
+  components: string[];
+  timestamp: number;
+  previous_annotations: Annotation[];
+  model?: string;
+}): Promise<Annotation[]> {
+  const response = await fetch(`${BASE_URL}/training/annotations/regenerate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await readApiError(response));
+  const payload = (await response.json()) as { annotations?: unknown };
+  return Array.isArray(payload.annotations) ? payload.annotations as Annotation[] : [];
 }
 
 export async function clearChatSession(sessionId: string): Promise<void> {

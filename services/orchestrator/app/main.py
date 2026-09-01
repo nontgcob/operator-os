@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 import secrets
 import sqlite3
@@ -219,6 +220,17 @@ class ChatStreamRequest(BaseModel):
     tracking_context: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class TrainingAnnotationRequest(BaseModel):
+    frame_data_url: str
+    step_title: str
+    instruction: str
+    expected_result: str = ""
+    components: list[str] = Field(default_factory=list)
+    timestamp: float = Field(ge=0)
+    previous_annotations: list[dict[str, Any]] = Field(default_factory=list)
+    model: str | None = None
+
+
 class DocumentRetrieveRequest(BaseModel):
     question: str
     document_ids: list[str] = Field(default_factory=list)
@@ -295,6 +307,13 @@ async def _youtube_url_from_request(request: Request, form_value: str | None = N
     return None
 
 
+def _validated_snapshot_interval(value: float) -> float:
+    interval = float(value)
+    if not math.isfinite(interval) or interval < 1 or interval > 3600:
+        raise HTTPException(status_code=422, detail="snapshot_interval_seconds must be between 1 and 3600")
+    return interval
+
+
 def _build_segmentation_prompt(question: str, annotations: list[dict[str, Any]]) -> str:
     if annotations:
         return f"Track the operator-referenced object related to: {question}"
@@ -323,8 +342,10 @@ async def media_ingest(
     request: Request,
     file: UploadFile = File(default=None),
     youtube_url: str | None = Form(default=None),
+    snapshot_interval_seconds: float = 2.0,
 ) -> Any:
     youtube_url = await _youtube_url_from_request(request, youtube_url)
+    snapshot_interval_seconds = _validated_snapshot_interval(snapshot_interval_seconds)
     if not file and not youtube_url:
         raise HTTPException(status_code=400, detail="Provide file or youtube_url")
 
@@ -332,11 +353,16 @@ async def media_ingest(
         async with httpx.AsyncClient(timeout=MEDIA_INGEST_TIMEOUT_SECONDS) as client:
             if file:
                 payload = {"file": (file.filename, await file.read(), file.content_type)}
-                response = await client.post(f"{VIDEO_SERVICE_URL}/media/ingest", files=payload)
+                response = await client.post(
+                    f"{VIDEO_SERVICE_URL}/media/ingest",
+                    files=payload,
+                    params={"snapshot_interval_seconds": snapshot_interval_seconds},
+                )
             else:
                 response = await client.post(
                     f"{VIDEO_SERVICE_URL}/media/ingest",
                     json={"youtube_url": youtube_url},
+                    params={"snapshot_interval_seconds": snapshot_interval_seconds},
                 )
     except httpx.TimeoutException as exc:
         raise HTTPException(
@@ -520,9 +546,12 @@ async def timeline_status(video_id: str) -> Any:
 
 
 @app.post("/video/timeline/rebuild")
-async def timeline_rebuild(video_id: str) -> Any:
+async def timeline_rebuild(video_id: str, snapshot_interval_seconds: float | None = None) -> Any:
+    params: dict[str, Any] = {"video_id": video_id}
+    if snapshot_interval_seconds is not None:
+        params["snapshot_interval_seconds"] = _validated_snapshot_interval(snapshot_interval_seconds)
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(f"{VIDEO_SERVICE_URL}/video/timeline/rebuild", params={"video_id": video_id})
+        response = await client.post(f"{VIDEO_SERVICE_URL}/video/timeline/rebuild", params=params)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     return response.json()
@@ -959,7 +988,7 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
     async def stream() -> Any:
         full_text = ""
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=600) as client:
                 async with client.stream(
                     "POST",
                     f"{RAGVLM_SERVICE_URL}/ragvlm/infer",
@@ -1000,8 +1029,13 @@ async def chat_stream(payload: ChatStreamRequest) -> StreamingResponse:
                             return
                         if chunk == "[DONE]":
                             break
-                        full_text += chunk
-                        yield _sse(chunk)
+                        if current_event.startswith("training_"):
+                            if current_event == "training_complete":
+                                full_text = chunk
+                            yield _sse(chunk, event=current_event)
+                        else:
+                            full_text += chunk
+                            yield _sse(chunk)
                     _append_conversation(payload.session_id, payload.question, full_text)
                     _record_chat_message(
                         session_id=payload.session_id,
@@ -1130,6 +1164,19 @@ async def tracking_events(tracking_job_id: str) -> StreamingResponse:
         yield "data: {\"done\": true, \"overlays\": []}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.post("/training/annotations/regenerate")
+async def regenerate_training_annotation(payload: TrainingAnnotationRequest) -> Response:
+    request_body = payload.model_dump(exclude_none=True)
+    async with httpx.AsyncClient(timeout=300) as client:
+        upstream = await client.post(
+            f"{RAGVLM_SERVICE_URL}/training/annotations/regenerate",
+            json=request_body,
+        )
+    if upstream.status_code >= 400:
+        raise HTTPException(status_code=upstream.status_code, detail=upstream.text)
+    return Response(content=upstream.content, media_type="application/json")
 
 
 @app.post("/tracking/cancel/{tracking_job_id}")

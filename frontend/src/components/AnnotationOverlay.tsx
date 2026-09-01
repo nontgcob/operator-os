@@ -150,6 +150,14 @@ function annotationLabelPoint(annotation: Annotation): Point | null {
   return null;
 }
 
+function machineAnnotationLabel(annotation: Annotation, index: number): string {
+  const suppliedLabel = annotation.text ?? annotation.content;
+  if (typeof suppliedLabel === "string" && suppliedLabel.trim()) {
+    return suppliedLabel.trim().slice(0, 36);
+  }
+  return `Visual target ${index + 1}`;
+}
+
 function renderAnnotation(
   annotation: Annotation,
   index: number,
@@ -617,7 +625,9 @@ export function AnnotationOverlay({
       ))}
       {modelAnnotations.map((annotation, idx) => {
         const labelPoint = annotationLabelPoint(annotation);
-        const labelX = Math.min(80, Math.max(0, labelPoint?.x ?? 0));
+        const label = machineAnnotationLabel(annotation, idx);
+        const labelWidth = Math.min(32, Math.max(12, label.length * 0.9 + 2));
+        const labelX = Math.min(99 - labelWidth, Math.max(0, labelPoint?.x ?? 0));
         const labelY = Math.min(96, Math.max(4, (labelPoint?.y ?? 4) - 1));
         return (
           <g key={`machine-annotation-${idx}`} style={{ pointerEvents: "none" }}>
@@ -627,9 +637,9 @@ export function AnnotationOverlay({
             })}
             {labelPoint && (
               <g transform={`translate(${labelX} ${labelY})`}>
-                <rect x={0} y={-3.2} width={18.5} height={3.8} rx={0.8} fill="#111827" opacity={0.9} />
+                <rect x={0} y={-3.2} width={labelWidth} height={3.8} rx={0.8} fill="#111827" opacity={0.9} />
                 <text x={1} y={-0.6} fill="#ffffff" fontSize={1.65} fontWeight={700}>
-                  Machine annotation
+                  {label}
                 </text>
               </g>
             )}

@@ -202,6 +202,31 @@ def test_extract_transcript_falls_back_when_whisper_unavailable(tmp_path: Path, 
     assert written == segments
 
 
+def test_extract_frames_uses_requested_snapshot_interval(tmp_path: Path, monkeypatch) -> None:
+    module = _load_video_module()
+    module.BASE_DIR = tmp_path
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"fake mp4")
+    captured: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        frame_dir = tmp_path / "video-interval" / "frames"
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        for index in range(1, 4):
+            (frame_dir / f"frame_{index:05d}.jpg").write_bytes(b"frame")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    frames = module._extract_frames("video-interval", source_path, 120)
+
+    args = captured["args"]
+    assert args[args.index("-vf") + 1] == "fps=1/120"
+    assert [frame["timestamp"] for frame in frames] == [0, 120, 240]
+    assert captured["kwargs"] == {"capture_output": True, "text": True, "check": False}
+
+
 def test_ingest_media_accepts_youtube_json(tmp_path: Path, monkeypatch) -> None:
     module = _load_video_module()
     module.BASE_DIR = tmp_path
@@ -209,7 +234,7 @@ def test_ingest_media_accepts_youtube_json(tmp_path: Path, monkeypatch) -> None:
     _clear_ytdlp_env(monkeypatch)
     monkeypatch.setattr(module, "uuid4", lambda: "video-youtube")
     monkeypatch.setattr(module, "_extract_transcript", lambda video_id, source_path: [])
-    monkeypatch.setattr(module, "_extract_frames", lambda video_id, source_path: [])
+    monkeypatch.setattr(module, "_extract_frames", lambda video_id, source_path, interval=2.0: [])
     captured = {}
 
     class DownloadResult:
@@ -251,6 +276,7 @@ def test_ingest_media_accepts_youtube_json(tmp_path: Path, monkeypatch) -> None:
         "video_id": "video-youtube",
         "title": "Example YouTube Video Title",
         "source": "youtube",
+        "snapshot_interval_seconds": 2.0,
     }
     assert captured["args"][:5] == [
         "yt-dlp",
@@ -279,7 +305,7 @@ def test_ingest_media_returns_upload_title(tmp_path: Path, monkeypatch) -> None:
     module.BASE_DIR.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(module, "uuid4", lambda: "video-upload")
     monkeypatch.setattr(module, "_extract_transcript", lambda video_id, source_path: [])
-    monkeypatch.setattr(module, "_extract_frames", lambda video_id, source_path: [])
+    monkeypatch.setattr(module, "_extract_frames", lambda video_id, source_path, interval=2.0: [])
 
     client = TestClient(module.app)
     response = client.post(
@@ -292,6 +318,7 @@ def test_ingest_media_returns_upload_title(tmp_path: Path, monkeypatch) -> None:
         "video_id": "video-upload",
         "title": "maintenance_clip",
         "source": "upload",
+        "snapshot_interval_seconds": 2.0,
     }
     metadata = client.get("/media/metadata", params={"video_id": "video-upload"})
     assert metadata.status_code == 200
@@ -313,7 +340,7 @@ def test_ingest_media_includes_configured_ytdlp_options(tmp_path: Path, monkeypa
     monkeypatch.setenv("YTDLP_EXTRACTOR_ARGS", "youtube:player_client=default,ios")
     monkeypatch.setattr(module, "uuid4", lambda: "video-youtube-cookies")
     monkeypatch.setattr(module, "_extract_transcript", lambda video_id, source_path: [])
-    monkeypatch.setattr(module, "_extract_frames", lambda video_id, source_path: [])
+    monkeypatch.setattr(module, "_extract_frames", lambda video_id, source_path, interval=2.0: [])
     captured = {}
 
     class DownloadResult:
