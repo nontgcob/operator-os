@@ -147,6 +147,9 @@ describe("TrainingProcedureCard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Next step" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "Mark this step complete" }));
-    expect(screen.getByTestId("training-confetti")).toBeInTheDocument();
+    const confetti = screen.getByTestId("training-confetti");
+    expect(confetti).toBeInTheDocument();
+    expect(confetti.querySelectorAll('[data-side="left"]')).toHaveLength(24);
+    expect(confetti.querySelectorAll('[data-side="right"]')).toHaveLength(24);
   });
 });

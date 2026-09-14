@@ -7,15 +7,27 @@ import { DocumentCitations } from "@/components/DocumentCitations";
 import type { DocumentCitation, TrainingProcedure, TrainingStep } from "@/lib/types";
 
 const CONFETTI_COLORS = ["#6bbcff", "#1e3a8a", "#22c55e", "#facc15", "#fb7185", "#f8fafc"];
-const CONFETTI_PIECES = Array.from({ length: 48 }, (_, index) => ({
-  id: index,
-  left: (index * 37) % 100,
-  delay: (index % 12) * 32,
-  duration: 1050 + (index % 7) * 85,
-  drift: ((index * 29) % 190) - 95,
-  rotation: 220 + ((index * 53) % 540),
-  color: CONFETTI_COLORS[index % CONFETTI_COLORS.length],
-}));
+const CONFETTI_PIECES = Array.from({ length: 48 }, (_, index) => {
+  const side = index % 2 === 0 ? "left" : "right";
+  const direction = side === "left" ? 1 : -1;
+  const endY = ((index * 47) % 70) - 35;
+  const rotation = direction * (220 + ((index * 53) % 540));
+
+  return {
+    id: index,
+    side,
+    top: 46 + ((index * 13) % 9),
+    delay: (index % 8) * 28,
+    duration: 1000 + (index % 7) * 80,
+    midX: direction * (32 + ((index * 11) % 8)),
+    endX: direction * (50 + ((index * 17) % 12)),
+    midY: Math.round(endY * 0.45 - 5),
+    endY,
+    midRotation: Math.round(rotation * 0.55),
+    rotation,
+    color: CONFETTI_COLORS[index % CONFETTI_COLORS.length],
+  };
+});
 
 function resolvedVisualStatus(step: TrainingStep | undefined): NonNullable<TrainingStep["visual_status"]> {
   if (!step) return "pending";
@@ -163,12 +175,17 @@ export function TrainingProcedureCard({
           {CONFETTI_PIECES.map((piece) => (
             <i
               key={piece.id}
-              className="op-training-confetti-piece"
+              className={`op-training-confetti-piece op-training-confetti-piece--${piece.side}`}
+              data-side={piece.side}
               style={{
-                "--op-confetti-left": `${piece.left}%`,
+                "--op-confetti-top": `${piece.top}%`,
                 "--op-confetti-delay": `${piece.delay}ms`,
                 "--op-confetti-duration": `${piece.duration}ms`,
-                "--op-confetti-drift": `${piece.drift}px`,
+                "--op-confetti-mid-x": `${piece.midX}vw`,
+                "--op-confetti-end-x": `${piece.endX}vw`,
+                "--op-confetti-mid-y": `${piece.midY}vh`,
+                "--op-confetti-end-y": `${piece.endY}vh`,
+                "--op-confetti-mid-rotation": `${piece.midRotation}deg`,
                 "--op-confetti-rotation": `${piece.rotation}deg`,
                 "--op-confetti-color": piece.color,
               } as CSSProperties}
