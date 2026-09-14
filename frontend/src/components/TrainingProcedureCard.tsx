@@ -1,9 +1,26 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 
 import { DocumentCitations } from "@/components/DocumentCitations";
 import type { DocumentCitation, TrainingProcedure, TrainingStep } from "@/lib/types";
+
+const CONFETTI_COLORS = ["#6bbcff", "#1e3a8a", "#22c55e", "#facc15", "#fb7185", "#f8fafc"];
+const CONFETTI_PIECES = Array.from({ length: 48 }, (_, index) => ({
+  id: index,
+  left: (index * 37) % 100,
+  delay: (index % 12) * 32,
+  duration: 1050 + (index % 7) * 85,
+  drift: ((index * 29) % 190) - 95,
+  rotation: 220 + ((index * 53) % 540),
+  color: CONFETTI_COLORS[index % CONFETTI_COLORS.length],
+}));
+
+function resolvedVisualStatus(step: TrainingStep | undefined): NonNullable<TrainingStep["visual_status"]> {
+  if (!step) return "pending";
+  return step.visual_status ?? (step.annotations.length ? "ready" : "pending");
+}
 
 export function TrainingProcedureCard({
   procedure,
@@ -21,6 +38,8 @@ export function TrainingProcedureCard({
   const [hydratedStorageKey, setHydratedStorageKey] = useState("");
   const [regeneratingStepId, setRegeneratingStepId] = useState("");
   const [regenerationError, setRegenerationError] = useState("");
+  const [confettiRun, setConfettiRun] = useState<number | null>(null);
+  const waitingForVisualStepId = useRef("");
 
   useEffect(() => {
     try {
@@ -30,6 +49,7 @@ export function TrainingProcedureCard({
       setCompleted([]);
     } finally {
       setActivePart(0);
+      waitingForVisualStepId.current = "";
       setHydratedStorageKey(storageKey);
     }
   }, [storageKey]);
@@ -43,6 +63,12 @@ export function TrainingProcedureCard({
     }
   }, [completed, hydratedStorageKey, storageKey]);
 
+  useEffect(() => {
+    if (confettiRun === null) return;
+    const timeout = window.setTimeout(() => setConfettiRun(null), 2100);
+    return () => window.clearTimeout(timeout);
+  }, [confettiRun]);
+
   const isIntroduction = activePart === 0;
   const step = isIntroduction ? null : procedure.steps[activePart - 1];
   const completedCount = procedure.steps.filter((candidate) => completed.includes(candidate.id)).length;
@@ -51,9 +77,20 @@ export function TrainingProcedureCard({
     : 0;
   const stepComplete = step ? completed.includes(step.id) : false;
   const isFinalStep = activePart === procedure.steps.length;
-  const visualStatus = step?.visual_status ?? (step?.annotations.length ? "ready" : "pending");
-  const visualReady = visualStatus === "ready";
-  const visualPending = visualStatus === "pending" || visualStatus === "selecting_frame" || visualStatus === "generating_annotation";
+  const visualStatus = resolvedVisualStatus(step ?? undefined);
+  const exactFrameVisualBusy = Boolean(step && regeneratingStepId === step.id);
+  const visualReady = visualStatus === "ready" && !exactFrameVisualBusy;
+  const visualPending = exactFrameVisualBusy || visualStatus === "pending" || visualStatus === "selecting_frame" || visualStatus === "generating_annotation";
+  const readyVisualCount = procedure.steps.filter((candidate) => resolvedVisualStatus(candidate) === "ready").length;
+  const failedVisualCount = procedure.steps.filter((candidate) => resolvedVisualStatus(candidate) === "error").length;
+  const visualPreparationProgress = procedure.steps.length
+    ? Math.round((readyVisualCount / procedure.steps.length) * 100)
+    : 0;
+  const firstStepStatus = resolvedVisualStatus(procedure.steps[0]);
+  const firstStepAvailable = firstStepStatus === "ready" || firstStepStatus === "error";
+  const nextStep = !isIntroduction && !isFinalStep ? procedure.steps[activePart] : null;
+  const nextStepStatus = resolvedVisualStatus(nextStep ?? undefined);
+  const nextStepAvailable = !nextStep || nextStepStatus === "ready" || nextStepStatus === "error";
 
   const citation = useMemo<DocumentCitation[]>(() => {
     if (!step?.document_id || !step.filename) return [];
@@ -67,22 +104,43 @@ export function TrainingProcedureCard({
     }];
   }, [step]);
 
+  useEffect(() => {
+    if (!step || !visualReady || waitingForVisualStepId.current !== step.id) return;
+    waitingForVisualStepId.current = "";
+    void onShowStep(step);
+  }, [onShowStep, step, visualReady]);
+
   function openPart(nextPart: number) {
     const boundedPart = Math.max(0, Math.min(procedure.steps.length, nextPart));
     setActivePart(boundedPart);
     const nextStep = boundedPart > 0 ? procedure.steps[boundedPart - 1] : null;
-    if (nextStep && (nextStep.visual_status === "ready" || (!nextStep.visual_status && nextStep.annotations.length))) {
+    if (!nextStep) return;
+    if (nextStep.visual_status === "ready" || (!nextStep.visual_status && nextStep.annotations.length)) {
+      waitingForVisualStepId.current = "";
       void onShowStep(nextStep);
+    } else {
+      waitingForVisualStepId.current = nextStep.id;
     }
   }
 
   function advance() {
     if (isIntroduction) {
+      if (!firstStepAvailable) return;
       openPart(1);
       return;
     }
-    if (!visualReady || !stepComplete || isFinalStep) return;
+    if (!visualReady || !stepComplete || isFinalStep || !nextStepAvailable) return;
     openPart(activePart + 1);
+  }
+
+  function setStepCompletion(checked: boolean) {
+    if (!step) return;
+    setCompleted((current) => checked
+      ? Array.from(new Set([...current, step.id]))
+      : current.filter((id) => id !== step.id));
+    if (checked && isFinalStep && !stepComplete) {
+      setConfettiRun((current) => (current ?? 0) + 1);
+    }
   }
 
   async function regenerate() {
@@ -100,6 +158,24 @@ export function TrainingProcedureCard({
 
   return (
     <section className="op-training-procedure">
+      {confettiRun !== null ? (
+        <div key={confettiRun} className="op-training-confetti" data-testid="training-confetti" aria-hidden="true">
+          {CONFETTI_PIECES.map((piece) => (
+            <i
+              key={piece.id}
+              className="op-training-confetti-piece"
+              style={{
+                "--op-confetti-left": `${piece.left}%`,
+                "--op-confetti-delay": `${piece.delay}ms`,
+                "--op-confetti-duration": `${piece.duration}ms`,
+                "--op-confetti-drift": `${piece.drift}px`,
+                "--op-confetti-rotation": `${piece.rotation}deg`,
+                "--op-confetti-color": piece.color,
+              } as CSSProperties}
+            />
+          ))}
+        </div>
+      ) : null}
       <header>
         <div>
           <span className="op-training-kicker">Guided training</span>
@@ -123,6 +199,34 @@ export function TrainingProcedureCard({
         aria-valuenow={progress}
       >
         <span style={{ width: `${progress}%` }} />
+      </div>
+
+      <div className="op-training-visual-progress" aria-live="polite">
+        <div className="op-training-visual-progress-heading">
+          <strong>
+            {readyVisualCount === procedure.steps.length
+              ? "All visual guidance ready"
+              : "Preparing visual guidance"}
+          </strong>
+          <span>{readyVisualCount} of {procedure.steps.length} ready</span>
+        </div>
+        <div
+          className="op-training-visual-progress-bar"
+          role="progressbar"
+          aria-label="Visual guidance preparation"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={visualPreparationProgress}
+        >
+          <span style={{ width: `${visualPreparationProgress}%` }} />
+        </div>
+        {readyVisualCount < procedure.steps.length ? (
+          <small>
+            {failedVisualCount
+              ? `${failedVisualCount} visual${failedVisualCount === 1 ? " needs" : "s need"} attention; the others are still preparing.`
+              : "Earlier steps are prepared first while you review the introduction."}
+          </small>
+        ) : null}
       </div>
 
       {isIntroduction ? (
@@ -154,9 +258,10 @@ export function TrainingProcedureCard({
           <div className="op-training-step-heading">
             <span className="op-training-step-label">Step {activePart}</span>
             {visualReady ? <span className="op-visual-guidance-badge">Visual guidance ready</span> : null}
+            {exactFrameVisualBusy ? <span className="op-visual-guidance-pending"><span className="op-inline-spinner" /> Generating annotation</span> : null}
             {visualStatus === "selecting_frame" ? <span className="op-visual-guidance-pending"><span className="op-inline-spinner" /> Selecting frame</span> : null}
-            {visualStatus === "generating_annotation" ? <span className="op-visual-guidance-pending"><span className="op-inline-spinner" /> Generating annotation</span> : null}
-            {visualStatus === "pending" ? <span className="op-visual-guidance-pending">Waiting for visual processing</span> : null}
+            {visualStatus === "generating_annotation" && !exactFrameVisualBusy ? <span className="op-visual-guidance-pending"><span className="op-inline-spinner" /> Generating annotation</span> : null}
+            {visualStatus === "pending" && !exactFrameVisualBusy ? <span className="op-visual-guidance-pending">Waiting for visual processing</span> : null}
             {visualStatus === "error" ? <span className="op-visual-guidance-error">Visual guidance needs attention</span> : null}
           </div>
           <h4>{step.title}</h4>
@@ -170,7 +275,7 @@ export function TrainingProcedureCard({
                 Show this step in video
               </button>
             ) : null}
-            {typeof step.timestamp === "number" ? (
+            {typeof step.timestamp === "number" && (visualReady || visualStatus === "error" || exactFrameVisualBusy) ? (
               <button
                 type="button"
                 className="op-jump-button"
@@ -191,11 +296,7 @@ export function TrainingProcedureCard({
               type="checkbox"
               checked={stepComplete}
               disabled={!visualReady}
-              onChange={(event) => setCompleted((current) =>
-                event.target.checked
-                  ? Array.from(new Set([...current, step.id]))
-                  : current.filter((id) => id !== step.id)
-              )}
+              onChange={(event) => setStepCompletion(event.target.checked)}
             />
             <span>Mark this step complete</span>
           </label>
@@ -205,7 +306,7 @@ export function TrainingProcedureCard({
       <footer>
         <button
           type="button"
-          disabled={activePart <= 1}
+          disabled={activePart <= 1 || exactFrameVisualBusy}
           onClick={() => openPart(activePart - 1)}
           title={activePart <= 1 ? "Previous is unavailable on the introduction and first step" : "Go to previous step"}
         >
@@ -213,25 +314,33 @@ export function TrainingProcedureCard({
         </button>
         <span className="op-training-navigation-hint">
           {isIntroduction
-            ? "Start when you are ready."
+            ? firstStepAvailable ? "Start when you are ready." : "Step 1 visual is being prepared."
             : isFinalStep
               ? stepComplete ? "Training complete." : "Complete this final step."
-              : stepComplete ? "Next step unlocked." : "Complete this step to continue."}
+              : stepComplete
+                ? nextStepAvailable ? "Next step unlocked." : "Preparing the next step visual."
+                : "Complete this step to continue."}
         </span>
         <button
           type="button"
-          disabled={!isIntroduction && (!visualReady || !stepComplete || isFinalStep)}
+          disabled={isIntroduction
+            ? !firstStepAvailable
+            : !visualReady || !stepComplete || isFinalStep || !nextStepAvailable}
           onClick={advance}
         >
           {isIntroduction
-            ? "Start step 1"
+            ? firstStepAvailable
+              ? "Start step 1"
+              : <><span className="op-inline-spinner" /> Preparing step 1…</>
             : visualPending
               ? <><span className="op-inline-spinner" /> Preparing visual…</>
               : visualStatus === "error"
                 ? "Visual unavailable"
                 : isFinalStep
-              ? stepComplete ? "Training complete" : "Complete final step"
-              : "Next step"}
+                  ? stepComplete ? "Training complete" : "Complete final step"
+                  : stepComplete && !nextStepAvailable
+                    ? <><span className="op-inline-spinner" /> Getting next step ready…</>
+                    : "Next step"}
         </button>
       </footer>
     </section>

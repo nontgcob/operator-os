@@ -72,3 +72,12 @@ def normalize_annotation(annotation: dict[str, Any]) -> dict[str, Any]:
 
 def normalize_annotations(annotations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [normalize_annotation(annotation) for annotation in annotations]
+
+
+def normalize_generated_annotations(annotations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Clamp model output that is already expressed in RAGVLM 0-1000 space."""
+    return [
+        normalize_annotation({**annotation, "coordinate_space": "ragvlm_0_1000"})
+        for annotation in annotations
+        if isinstance(annotation, dict)
+    ]

@@ -19,7 +19,7 @@ if load_env_file:
     load_env_file()
 
 try:
-    from .annotations import normalize_annotations
+    from .annotations import normalize_annotations, normalize_generated_annotations
     from .model_families import DEFAULT_MODEL, model_family_for, model_supports_reasoning
     from .parse_response import DONE_SENTINEL, parse_openrouter_sse_line
     from .prompts import (
@@ -37,7 +37,7 @@ try:
         sync_preloaded_documents,
     )
 except ImportError:
-    from annotations import normalize_annotations
+    from annotations import normalize_annotations, normalize_generated_annotations
     from model_families import DEFAULT_MODEL, model_family_for, model_supports_reasoning
     from parse_response import DONE_SENTINEL, parse_openrouter_sse_line
     from prompts import (
@@ -519,44 +519,16 @@ async def infer(payload: InferRequest) -> StreamingResponse:
                                     "training_step_progress",
                                     {
                                         "step_id": step_id,
-                                        "status": "generating_annotation",
+                                        "status": "pending",
                                         "timestamp": timestamp,
                                     },
                                 )
                             )
-                            annotation_prompt = build_training_annotation_prompt(
-                                step_title=str(step.get("title") or "Training step"),
-                                instruction=str(step.get("instruction") or ""),
-                                expected_result=str(step.get("expected_result") or ""),
-                                components=[str(value) for value in step.get("components", [])],
-                                timestamp=timestamp,
-                                previous_annotations=[],
-                            )
-                            annotation_result = await _openrouter_json_request(
-                                client,
-                                model=payload.model,
-                                messages=[
-                                    {
-                                        "role": "user",
-                                        "content": [
-                                            {"type": "text", "text": annotation_prompt},
-                                            {
-                                                "type": "image_url",
-                                                "image_url": {"url": selected["frame_data_url"]},
-                                            },
-                                        ],
-                                    }
-                                ],
-                                reasoning_effort="medium",
-                            )
-                            raw_annotations = annotation_result.get("annotations")
-                            annotations = normalize_annotations(
-                                raw_annotations if isinstance(raw_annotations, list) else []
-                            )
-                            if not annotations:
-                                raise ValueError("Annotation model returned no usable annotations")
-                            step["annotations"] = annotations
-                            step["visual_status"] = "ready"
+                            # The browser generates visual guidance when this step opens.
+                            # That request captures the exact displayed video frame, avoiding
+                            # drift between an indexed representative image and the player.
+                            step["annotations"] = []
+                            step["visual_status"] = "pending"
                             step.pop("visual_error", None)
                             await queue.put(
                                 (
@@ -636,7 +608,9 @@ async def regenerate_training_annotation(payload: TrainingAnnotationRequest) -> 
     except (httpx.HTTPError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     raw_annotations = result.get("annotations")
-    annotations = normalize_annotations(raw_annotations if isinstance(raw_annotations, list) else [])
+    annotations = normalize_generated_annotations(
+        raw_annotations if isinstance(raw_annotations, list) else []
+    )
     if not annotations:
         raise HTTPException(status_code=502, detail="Annotation model returned no usable annotations")
     return {"annotations": annotations}

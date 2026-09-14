@@ -2,7 +2,7 @@ import type { Annotation, TrackingLayer, TrackingOverlay, TrackingTarget } from 
 
 export const TRACKING_LAYER_COLORS = [
   "#22c55e",
-  "#8b5cf6",
+  "#2563eb",
   "#0ea5e9",
   "#f97316",
   "#ec4899",

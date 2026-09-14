@@ -6,7 +6,7 @@ from pathlib import Path
 RAGVLM_APP_PATH = Path(__file__).resolve().parents[1] / "services" / "ragvlm-service" / "app"
 sys.path.append(str(RAGVLM_APP_PATH))
 
-from annotations import normalize_annotations  # type: ignore  # noqa: E402
+from annotations import normalize_annotations, normalize_generated_annotations  # type: ignore  # noqa: E402
 from prompts import build_prompt  # type: ignore  # noqa: E402
 
 
@@ -32,6 +32,43 @@ def test_annotation_normalization_scales_svg_coordinates() -> None:
     assert annotation["width"] == 80.0
     assert annotation["height"] == 40.0
     assert annotation["points"] == [{"x": 10.0, "y": 20.0}]
+
+
+def test_generated_annotation_coordinates_are_not_scaled_twice() -> None:
+    normalized = normalize_generated_annotations(
+        [
+            {
+                "type": "rect",
+                "x": 520,
+                "y": 370,
+                "width": 120,
+                "height": 180,
+                "text": "Top tube",
+            },
+            {
+                "type": "arrow",
+                "x1": 800,
+                "y1": 500,
+                "x2": 610,
+                "y2": 420,
+                "text": "Insert here",
+            },
+        ]
+    )
+
+    assert normalized[0] == {
+        "type": "rect",
+        "x": 520.0,
+        "y": 370.0,
+        "width": 120.0,
+        "height": 180.0,
+        "text": "Top tube",
+        "coordinate_space": "ragvlm_0_1000",
+    }
+    assert normalized[1]["x1"] == 800.0
+    assert normalized[1]["y1"] == 500.0
+    assert normalized[1]["x2"] == 610.0
+    assert normalized[1]["y2"] == 420.0
 
 
 def test_prompt_includes_ragvlm_grounding_sections() -> None:

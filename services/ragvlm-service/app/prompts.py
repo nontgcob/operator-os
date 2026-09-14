@@ -118,11 +118,12 @@ MANDATORY LOCALIZATION RULES:
 - If motion is required, include both a tight shape around the moving part and an arrow showing the correct direction. The arrow endpoint must land on that part.
 - Every annotation must include a short `text` label naming its target.
 - All coordinates use the image-wide normalized 0-1000 space: top-left (0,0), bottom-right (1000,1000).
+- Every annotation must include `"coordinate_space":"ragvlm_0_1000"`.
 - Use ONLY canonical geometry:
-  - rect: {{"type":"rect","x":number,"y":number,"width":number,"height":number,"text":string,"color":string}}
-  - arrow: {{"type":"arrow","x1":number,"y1":number,"x2":number,"y2":number,"text":string,"color":string}}
-  - polygon: {{"type":"polygon","points":[{{"x":number,"y":number}}],"text":string,"color":string}}
-  - circle: {{"type":"circle","cx":number,"cy":number,"r":number,"text":string,"color":string}}
+  - rect: {{"type":"rect","x":number,"y":number,"width":number,"height":number,"text":string,"color":string,"coordinate_space":"ragvlm_0_1000"}}
+  - arrow: {{"type":"arrow","x1":number,"y1":number,"x2":number,"y2":number,"text":string,"color":string,"coordinate_space":"ragvlm_0_1000"}}
+  - polygon: {{"type":"polygon","points":[{{"x":number,"y":number}}],"text":string,"color":string,"coordinate_space":"ragvlm_0_1000"}}
+  - circle: {{"type":"circle","cx":number,"cy":number,"r":number,"text":string,"color":string,"coordinate_space":"ragvlm_0_1000"}}
 - Do not use `box`, `box_2d`, `coordinates`, `label`, `start`, or `end` fields.
 
 Before answering, verify that every coordinate is within 0-1000 and that each shape tightly encloses the named actionable target rather than the machine as a whole."""

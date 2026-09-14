@@ -236,11 +236,12 @@ export async function regenerateTrainingAnnotation(input: {
   timestamp: number;
   previous_annotations: Annotation[];
   model?: string;
-}): Promise<Annotation[]> {
+}, signal?: AbortSignal): Promise<Annotation[]> {
   const response = await fetch(`${BASE_URL}/training/annotations/regenerate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
+    signal,
   });
   if (!response.ok) throw new Error(await readApiError(response));
   const payload = (await response.json()) as { annotations?: unknown };

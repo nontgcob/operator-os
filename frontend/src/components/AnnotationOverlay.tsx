@@ -53,6 +53,16 @@ function tuplePoints(points: Annotation["points"]): number[][] {
   return (points ?? []).filter((point): point is number[] => Array.isArray(point));
 }
 
+function coordinatePoints(points: Annotation["points"]): Point[] {
+  return (points ?? []).flatMap((point) => {
+    if (Array.isArray(point)) {
+      const [x, y] = point;
+      return typeof x === "number" && typeof y === "number" ? [{ x, y }] : [];
+    }
+    return typeof point.x === "number" && typeof point.y === "number" ? [point] : [];
+  });
+}
+
 function scalePath(d: string) {
   return d.replace(/([-+]?\d*\.?\d+)/g, (match) => String(parseFloat(match) / 10));
 }
@@ -158,6 +168,223 @@ function machineAnnotationLabel(annotation: Annotation, index: number): string {
   return `Visual target ${index + 1}`;
 }
 
+interface AnnotationBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+const LABEL_ASSOCIATION_MARGIN = 6;
+const MACHINE_LABEL_MARGIN = 1.2;
+const MACHINE_LABEL_TOP_SAFE = 4;
+const MACHINE_LABEL_BOTTOM_SAFE = 90;
+const MACHINE_LABEL_HEIGHT = 3.8;
+const MACHINE_LABEL_ANCHOR_GAP = 1.1;
+
+function annotationText(annotation: Annotation): string {
+  const value = annotation.text ?? annotation.content;
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function comparableLabel(annotation: Annotation): string {
+  return annotationText(annotation)
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function singularLabel(label: string): string {
+  if (label.endsWith("ies") && label.length > 4) return `${label.slice(0, -3)}y`;
+  if (label.endsWith("s") && !label.endsWith("ss") && label.length > 3) return label.slice(0, -1);
+  return label;
+}
+
+function labelsMatch(left: Annotation, right: Annotation): boolean {
+  const leftLabel = comparableLabel(left);
+  const rightLabel = comparableLabel(right);
+  return Boolean(
+    leftLabel &&
+      rightLabel &&
+      (leftLabel === rightLabel || singularLabel(leftLabel) === singularLabel(rightLabel))
+  );
+}
+
+function annotationBounds(annotation: Annotation): AnnotationBounds | null {
+  if (
+    annotation.type === "rect" &&
+    annotation.x !== undefined &&
+    annotation.y !== undefined &&
+    annotation.width !== undefined &&
+    annotation.height !== undefined
+  ) {
+    const left = v(annotation.x);
+    const top = v(annotation.y);
+    return {
+      left,
+      top,
+      right: left + v(annotation.width),
+      bottom: top + v(annotation.height),
+    };
+  }
+
+  if (annotation.type === "circle") {
+    const x = annotation.cx ?? annotation.x;
+    const y = annotation.cy ?? annotation.y;
+    const radius = annotation.r ?? annotation.radius;
+    if (x === undefined || y === undefined || radius === undefined) return null;
+    const cx = v(x);
+    const cy = v(y);
+    const r = v(radius);
+    return { left: cx - r, top: cy - r, right: cx + r, bottom: cy + r };
+  }
+
+  if (
+    annotation.type === "arrow" &&
+    annotation.x1 !== undefined &&
+    annotation.y1 !== undefined &&
+    annotation.x2 !== undefined &&
+    annotation.y2 !== undefined
+  ) {
+    return {
+      left: Math.min(v(annotation.x1), v(annotation.x2)),
+      top: Math.min(v(annotation.y1), v(annotation.y2)),
+      right: Math.max(v(annotation.x1), v(annotation.x2)),
+      bottom: Math.max(v(annotation.y1), v(annotation.y2)),
+    };
+  }
+
+  const points = coordinatePoints(annotation.points);
+  if (!points.length) return null;
+  const xs = points.map((point) => v(point.x));
+  const ys = points.map((point) => v(point.y));
+  return {
+    left: Math.min(...xs),
+    top: Math.min(...ys),
+    right: Math.max(...xs),
+    bottom: Math.max(...ys),
+  };
+}
+
+function labelDistance(point: Point, bounds: AnnotationBounds): number {
+  const dx = Math.max(bounds.left - point.x, 0, point.x - bounds.right);
+  const dy = Math.max(bounds.top - point.y, 0, point.y - bounds.bottom);
+  return Math.hypot(dx, dy);
+}
+
+function clampPercent(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function labelOverlapArea(
+  label: AnnotationBounds,
+  target: AnnotationBounds,
+) {
+  const width = Math.max(0, Math.min(label.right, target.right) - Math.max(label.left, target.left));
+  const height = Math.max(0, Math.min(label.bottom, target.bottom) - Math.max(label.top, target.top));
+  return width * height;
+}
+
+function machineLabelPosition(annotation: Annotation, labelWidth: number): Point | null {
+  const targetBounds = annotationBounds(annotation);
+  const fallbackPoint = annotationLabelPoint(annotation);
+  if (!targetBounds && !fallbackPoint) return null;
+
+  const halfWidth = labelWidth / 2;
+  const leftLimit = MACHINE_LABEL_MARGIN;
+  const rightLimit = 100 - MACHINE_LABEL_MARGIN - labelWidth;
+  const topLimit = MACHINE_LABEL_TOP_SAFE + MACHINE_LABEL_HEIGHT;
+  const bottomLimit = MACHINE_LABEL_BOTTOM_SAFE;
+
+  if (!targetBounds) {
+    return {
+      x: clampPercent(fallbackPoint!.x, leftLimit, rightLimit),
+      y: clampPercent(fallbackPoint!.y - MACHINE_LABEL_ANCHOR_GAP, topLimit, bottomLimit),
+    };
+  }
+
+  const centerX = (targetBounds.left + targetBounds.right) / 2;
+  const centerY = (targetBounds.top + targetBounds.bottom) / 2;
+  const candidates = [
+    {
+      x: centerX - halfWidth,
+      y: targetBounds.top - MACHINE_LABEL_ANCHOR_GAP,
+      preference: targetBounds.top > MACHINE_LABEL_BOTTOM_SAFE ? 0 : 1,
+    },
+    {
+      x: centerX - halfWidth,
+      y: targetBounds.bottom + MACHINE_LABEL_HEIGHT + MACHINE_LABEL_ANCHOR_GAP,
+      preference: 2,
+    },
+    {
+      x: targetBounds.right + MACHINE_LABEL_ANCHOR_GAP,
+      y: centerY + MACHINE_LABEL_HEIGHT / 2,
+      preference: 3,
+    },
+    {
+      x: targetBounds.left - labelWidth - MACHINE_LABEL_ANCHOR_GAP,
+      y: centerY + MACHINE_LABEL_HEIGHT / 2,
+      preference: 4,
+    },
+  ];
+
+  return candidates
+    .map((candidate) => {
+      const x = clampPercent(candidate.x, leftLimit, rightLimit);
+      const y = clampPercent(candidate.y, topLimit, bottomLimit);
+      const labelBounds = {
+        left: x,
+        top: y - MACHINE_LABEL_HEIGHT,
+        right: x + labelWidth,
+        bottom: y,
+      };
+      const overlapPenalty = labelOverlapArea(labelBounds, targetBounds) * 12;
+      const controlPenalty = y > MACHINE_LABEL_BOTTOM_SAFE - 4 ? 35 : 0;
+      const clampPenalty = Math.abs(candidate.x - x) + Math.abs(candidate.y - y);
+      return {
+        x,
+        y,
+        score: candidate.preference + overlapPenalty + controlPenalty + clampPenalty,
+      };
+    })
+    .sort((left, right) => left.score - right.score)[0];
+}
+
+function machineLabelSuppressions(annotations: Annotation[]): Set<number> {
+  const suppressed = new Set<number>();
+  const geometry = annotations
+    .map((annotation, index) => ({ annotation, bounds: annotationBounds(annotation), index }))
+    .filter((item) => item.bounds !== null);
+
+  annotations.forEach((annotation, index) => {
+    if (annotation.type !== "text" || !annotationText(annotation)) return;
+    suppressed.add(index);
+
+    const labelPoint = annotationLabelPoint(annotation);
+    if (!labelPoint) return;
+
+    const matching = geometry.filter((item) => labelsMatch(item.annotation, annotation));
+    const nearby = geometry.filter(
+      (item) => labelDistance(labelPoint, item.bounds!) <= LABEL_ASSOCIATION_MARGIN
+    );
+    const candidates = matching.length ? matching : nearby;
+    const associated = candidates.sort((left, right) => {
+      const leftBounds = left.bounds!;
+      const rightBounds = right.bounds!;
+      const leftArea =
+        Math.max(1, leftBounds.right - leftBounds.left) *
+        Math.max(1, leftBounds.bottom - leftBounds.top);
+      const rightArea =
+        Math.max(1, rightBounds.right - rightBounds.left) *
+        Math.max(1, rightBounds.bottom - rightBounds.top);
+      return leftArea - rightArea;
+    })[0];
+    if (associated) suppressed.add(associated.index);
+  });
+
+  return suppressed;
+}
+
 function renderAnnotation(
   annotation: Annotation,
   index: number,
@@ -249,8 +476,8 @@ function renderAnnotation(
   }
 
   if (annotation.type === "polygon" && annotation.points?.length) {
-    const points = tuplePoints(annotation.points)
-      .map(([x, y]) => `${v(x)},${v(y)}`)
+    const points = coordinatePoints(annotation.points)
+      .map((point) => `${v(point.x)},${v(point.y)}`)
       .join(" ");
     return (
       <polygon
@@ -364,6 +591,7 @@ export function AnnotationOverlay({
   onPushUndo,
 }: AnnotationOverlayProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const suppressedMachineLabels = machineLabelSuppressions(modelAnnotations);
   const annotationsRef = useRef(annotations);
   const activeToolRef = useRef(activeTool);
   const drawColorRef = useRef(drawColor);
@@ -624,20 +852,18 @@ export function AnnotationOverlay({
         />
       ))}
       {modelAnnotations.map((annotation, idx) => {
-        const labelPoint = annotationLabelPoint(annotation);
         const label = machineAnnotationLabel(annotation, idx);
         const labelWidth = Math.min(32, Math.max(12, label.length * 0.9 + 2));
-        const labelX = Math.min(99 - labelWidth, Math.max(0, labelPoint?.x ?? 0));
-        const labelY = Math.min(96, Math.max(4, (labelPoint?.y ?? 4) - 1));
+        const labelPoint = machineLabelPosition(annotation, labelWidth);
         return (
           <g key={`machine-annotation-${idx}`} style={{ pointerEvents: "none" }}>
             {renderAnnotation(annotation, -(idx + 1), {
               aspectRatio: videoAspectRatio,
               interactive: false,
             })}
-            {labelPoint && (
-              <g transform={`translate(${labelX} ${labelY})`}>
-                <rect x={0} y={-3.2} width={labelWidth} height={3.8} rx={0.8} fill="#111827" opacity={0.9} />
+            {labelPoint && !suppressedMachineLabels.has(idx) && (
+              <g transform={`translate(${labelPoint.x} ${labelPoint.y})`}>
+                <rect x={0} y={-3.2} width={labelWidth} height={MACHINE_LABEL_HEIGHT} rx={0.8} fill="#111827" opacity={0.9} />
                 <text x={1} y={-0.6} fill="#ffffff" fontSize={1.65} fontWeight={700}>
                   {label}
                 </text>

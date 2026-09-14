@@ -178,7 +178,7 @@ function hasValidPoints(value: unknown, minPoints = 1): boolean {
 function normalizeModelAnnotation(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   const candidate = value as Record<string, unknown>;
-  const color = typeof candidate.color === "string" ? candidate.color : "#8b5cf6";
+  const color = typeof candidate.color === "string" ? candidate.color : "#3b82f6";
   const text = typeof candidate.text === "string"
     ? candidate.text
     : typeof candidate.label === "string"

@@ -35,14 +35,15 @@ const procedure: TrainingProcedure = {
 };
 
 describe("TrainingProcedureCard", () => {
-  it("starts at step 0 and reveals one gated step at a time", () => {
+  it("opens prepared steps instantly without making another annotation request", () => {
     const showStep = vi.fn();
+    const regenerateStep = vi.fn().mockResolvedValue(undefined);
     render(
       <TrainingProcedureCard
         procedure={procedure}
         storageKey="training-test"
         onShowStep={showStep}
-        onRegenerateStep={vi.fn().mockResolvedValue(undefined)}
+        onRegenerateStep={regenerateStep}
       />
     );
 
@@ -50,6 +51,7 @@ describe("TrainingProcedureCard", () => {
     expect(screen.queryByText("Turn on power")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
     expect(screen.getByRole("progressbar", { name: "Training progress" })).toHaveAttribute("aria-valuenow", "0");
+    expect(screen.getByRole("progressbar", { name: "Visual guidance preparation" })).toHaveAttribute("aria-valuenow", "100");
 
     fireEvent.click(screen.getByRole("button", { name: "Start step 1" }));
     expect(screen.getByText("Inspect the switch")).toBeInTheDocument();
@@ -57,6 +59,7 @@ describe("TrainingProcedureCard", () => {
     expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Next step" })).toBeDisabled();
     expect(showStep).toHaveBeenCalledWith(procedure.steps[0]);
+    expect(regenerateStep).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("checkbox", { name: "Mark this step complete" }));
     expect(screen.getByRole("progressbar", { name: "Training progress" })).toHaveAttribute("aria-valuenow", "50");
@@ -67,9 +70,10 @@ describe("TrainingProcedureCard", () => {
     expect(screen.queryByText("Inspect the switch")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Previous" })).toBeEnabled();
     expect(showStep).toHaveBeenLastCalledWith(procedure.steps[1]);
+    expect(regenerateStep).not.toHaveBeenCalled();
   });
 
-  it("shows a disabled loading action while the active step visual is still generating", () => {
+  it("keeps the introduction available while step 1 prepares in the background", () => {
     const pendingProcedure: TrainingProcedure = {
       ...procedure,
       steps: [
@@ -83,15 +87,66 @@ describe("TrainingProcedureCard", () => {
         procedure={pendingProcedure}
         storageKey="training-pending-test"
         onShowStep={showStep}
+        onRegenerateStep={vi.fn().mockImplementation(() => new Promise<void>(() => undefined))}
+      />
+    );
+
+    expect(screen.getByText("Before you begin")).toBeInTheDocument();
+    expect(screen.getByText("1 of 2 ready")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Preparing step 1/ })).toBeDisabled();
+    expect(showStep).not.toHaveBeenCalled();
+  });
+
+  it("gates the next step only when its visual has not finished", () => {
+    const preparingNext: TrainingProcedure = {
+      ...procedure,
+      steps: [
+        { ...procedure.steps[0], visual_status: "ready" },
+        { ...procedure.steps[1], annotations: [], visual_status: "generating_annotation" },
+      ],
+    };
+    const showStep = vi.fn();
+    const props = {
+      storageKey: "training-next-prefetch-test",
+      onShowStep: showStep,
+      onRegenerateStep: vi.fn().mockResolvedValue(undefined),
+    };
+    const { rerender } = render(<TrainingProcedureCard procedure={preparingNext} {...props} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Start step 1" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Mark this step complete" }));
+    expect(screen.getByRole("button", { name: /Getting next step ready/ })).toBeDisabled();
+
+    const readyNext: TrainingProcedure = {
+      ...preparingNext,
+      steps: preparingNext.steps.map((step, index) => index === 1
+        ? { ...step, annotations: [{ type: "rect", x: 200, y: 200, width: 80, height: 60 }], visual_status: "ready" }
+        : step),
+    };
+    rerender(<TrainingProcedureCard procedure={readyNext} {...props} />);
+
+    expect(screen.getByRole("button", { name: "Next step" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Next step" }));
+    expect(screen.getByText("Turn on power")).toBeInTheDocument();
+    expect(showStep).toHaveBeenLastCalledWith(readyNext.steps[1]);
+  });
+
+  it("celebrates only when the final step is newly completed", () => {
+    render(
+      <TrainingProcedureCard
+        procedure={procedure}
+        storageKey="training-confetti-test"
+        onShowStep={vi.fn()}
         onRegenerateStep={vi.fn().mockResolvedValue(undefined)}
       />
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Start step 1" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Mark this step complete" }));
+    expect(screen.queryByTestId("training-confetti")).not.toBeInTheDocument();
 
-    expect(screen.getByText("Generating annotation")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Preparing visual/ })).toBeDisabled();
-    expect(screen.getByRole("checkbox", { name: "Mark this step complete" })).toBeDisabled();
-    expect(showStep).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Next step" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Mark this step complete" }));
+    expect(screen.getByTestId("training-confetti")).toBeInTheDocument();
   });
 });

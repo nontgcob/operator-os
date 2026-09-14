@@ -365,15 +365,15 @@ export default function Home() {
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [modelAnnotations, setModelAnnotations] = useState<Annotation[]>([]);
   const [trackingLayers, setTrackingLayers] = useState<TrackingLayer[]>([]);
-  const [trackingEnabled, setTrackingEnabled] = useState(false);
-  const [showTrackingOverlays, setShowTrackingOverlays] = useState(false);
+  const trackingEnabled = true;
+  const showTrackingOverlays = true;
   const [activeTrackingJobs, setActiveTrackingJobs] = useState<ActiveTrackingJob[]>([]);
   const [trackingStatus, setTrackingStatus] = useState("");
   const [trackingError, setTrackingError] = useState("");
   const [trackingExporting, setTrackingExporting] = useState(false);
   const [trackingExportStatus, setTrackingExportStatus] = useState("");
   const [chatClearStatus, setChatClearStatus] = useState("");
-  const [sendAnnotatedSnapshot, setSendAnnotatedSnapshot] = useState(false);
+  const sendAnnotatedSnapshot = true;
   const [isPaused, setIsPaused] = useState(false);
   const [activeTool, setActiveTool] = useState<AnnotationType>("cursor");
   const [annotationUndoStack, setAnnotationUndoStack] = useState<AnnotationUndoEntry[]>([]);
@@ -389,6 +389,7 @@ export default function Home() {
   const localFileInputRef = useRef<HTMLInputElement | null>(null);
   const trackingEventSourcesRef = useRef<Map<string, EventSource>>(new Map());
   const activeChatAbortRef = useRef<AbortController | null>(null);
+  const trainingVisualAbortRef = useRef<AbortController | null>(null);
   const processingChatRef = useRef(false);
   const queuedChatMessagesRef = useRef<QueuedChatMessage[]>([]);
   const trackingLayersRef = useRef<TrackingLayer[]>([]);
@@ -397,6 +398,7 @@ export default function Home() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const speechChunksRef = useRef<Blob[]>([]);
   const speechStreamRef = useRef<MediaStream | null>(null);
+  const modeSelectorRef = useRef<HTMLDetailsElement | null>(null);
   const snapshotIntervalSeconds = Math.min(
     3600,
     Math.max(1, snapshotIntervalValue * (snapshotIntervalUnit === "minutes" ? 60 : 1))
@@ -559,6 +561,8 @@ export default function Home() {
     if (typeof step.timestamp !== "number") {
       throw new Error("This step does not have a selected video frame yet.");
     }
+    const regenerationContext = contextGenerationRef.current;
+    setModelAnnotations([]);
     await jumpToVideoMoment(step.timestamp);
     await new Promise<void>((resolve) => {
       window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()));
@@ -575,6 +579,7 @@ export default function Home() {
       model,
     });
     if (!annotations.length) throw new Error("No usable annotations were returned.");
+    if (regenerationContext !== contextGenerationRef.current) return;
     setChatMessages((current) => current.map((message) => {
       if (message.id !== messageId || !message.trainingProcedure) return message;
       return {
@@ -594,6 +599,159 @@ export default function Home() {
       fontSize: annotation.fontSize ?? 1,
       strokeWidth: annotation.strokeWidth ?? 3,
     })));
+  }
+
+  async function captureTrainingFrame(sourceTimestamp: number, signal: AbortSignal): Promise<string> {
+    if (!videoUrl) throw new Error("Video source is unavailable.");
+    const sourceUrl = videoUrl;
+    const playerTimestamp = Math.max(0, sourceTimestamp - videoTimeOffset);
+    const video = document.createElement("video");
+    video.crossOrigin = "anonymous";
+    video.muted = true;
+    video.preload = "auto";
+    video.playsInline = true;
+    video.style.cssText = "position:fixed;left:-2px;top:-2px;width:1px;height:1px;opacity:0;pointer-events:none";
+    document.body.appendChild(video);
+
+    const waitForEvent = (eventName: "loadedmetadata" | "loadeddata" | "seeked") => new Promise<void>((resolve, reject) => {
+      let timeoutId = 0;
+      const cleanup = () => {
+        window.clearTimeout(timeoutId);
+        video.removeEventListener(eventName, handleEvent);
+        video.removeEventListener("error", handleError);
+        signal.removeEventListener("abort", handleAbort);
+      };
+      const handleEvent = () => {
+        cleanup();
+        resolve();
+      };
+      const handleError = () => {
+        cleanup();
+        reject(new Error("Unable to load the selected training frame."));
+      };
+      const handleAbort = () => {
+        cleanup();
+        reject(new DOMException("Training visual preparation was cancelled.", "AbortError"));
+      };
+      video.addEventListener(eventName, handleEvent, { once: true });
+      video.addEventListener("error", handleError, { once: true });
+      signal.addEventListener("abort", handleAbort, { once: true });
+      timeoutId = window.setTimeout(() => {
+        cleanup();
+        reject(new Error("Timed out while preparing the selected training frame."));
+      }, 15000);
+    });
+
+    try {
+      if (signal.aborted) throw new DOMException("Training visual preparation was cancelled.", "AbortError");
+      video.src = sourceUrl;
+      video.load();
+      if (video.readyState < HTMLMediaElement.HAVE_METADATA) await waitForEvent("loadedmetadata");
+      const durationLimit = Number.isFinite(video.duration) ? Math.max(0, video.duration - 0.001) : playerTimestamp;
+      const targetTimestamp = Math.min(playerTimestamp, durationLimit);
+      if (Math.abs(video.currentTime - targetTimestamp) > 0.001) {
+        video.currentTime = targetTimestamp;
+        await waitForEvent("seeked");
+      } else if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        await waitForEvent("loadeddata");
+      }
+      if (typeof video.requestVideoFrameCallback === "function") {
+        await new Promise<void>((resolve) => {
+          let settled = false;
+          let timeoutId = 0;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            window.clearTimeout(timeoutId);
+            resolve();
+          };
+          const callbackId = video.requestVideoFrameCallback(finish);
+          timeoutId = window.setTimeout(() => {
+            video.cancelVideoFrameCallback(callbackId);
+            finish();
+          }, 1000);
+        });
+      } else {
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())));
+      }
+      if (signal.aborted) throw new DOMException("Training visual preparation was cancelled.", "AbortError");
+      if (!video.videoWidth || !video.videoHeight) throw new Error("The selected training frame has no dimensions.");
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Canvas unavailable");
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL("image/jpeg", 0.9);
+    } finally {
+      video.removeAttribute("src");
+      video.load();
+      video.remove();
+    }
+  }
+
+  async function prepareTrainingVisuals(
+    messageId: string,
+    procedure: TrainingProcedure,
+    model: string | undefined,
+    requestGeneration: number
+  ) {
+    trainingVisualAbortRef.current?.abort();
+    const controller = new AbortController();
+    trainingVisualAbortRef.current = controller;
+    const steps = procedure.steps.filter((step) => typeof step.timestamp === "number");
+    let nextIndex = 0;
+
+    const updateStep = (stepId: string, update: Partial<TrainingStep>) => {
+      if (controller.signal.aborted || requestGeneration !== contextGenerationRef.current) return;
+      setChatMessages((current) => current.map((message) => {
+        if (message.id !== messageId || !message.trainingProcedure) return message;
+        return {
+          ...message,
+          trainingProcedure: {
+            ...message.trainingProcedure,
+            steps: message.trainingProcedure.steps.map((step) =>
+              step.id === stepId ? { ...step, ...update } : step
+            ),
+          },
+        };
+      }));
+    };
+
+    const worker = async () => {
+      while (!controller.signal.aborted) {
+        const index = nextIndex;
+        nextIndex += 1;
+        const step = steps[index];
+        if (!step) return;
+        updateStep(step.id, { visual_status: "generating_annotation", visual_error: "" });
+        try {
+          const frameData = await captureTrainingFrame(step.timestamp as number, controller.signal);
+          const annotations = await regenerateTrainingAnnotation({
+            frame_data_url: frameData,
+            step_title: step.title,
+            instruction: step.instruction,
+            expected_result: step.expected_result,
+            components: step.components,
+            timestamp: step.timestamp as number,
+            previous_annotations: [],
+            model,
+          }, controller.signal);
+          if (!annotations.length) throw new Error("No usable annotations were returned.");
+          updateStep(step.id, { annotations, visual_status: "ready", visual_error: "" });
+        } catch (error) {
+          if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return;
+          updateStep(step.id, {
+            annotations: [],
+            visual_status: "error",
+            visual_error: error instanceof Error ? error.message : "Unable to prepare visual guidance.",
+          });
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(2, steps.length) }, () => worker()));
+    if (trainingVisualAbortRef.current === controller) trainingVisualAbortRef.current = null;
   }
 
   async function handleTimelineRebuild() {
@@ -715,6 +873,8 @@ export default function Home() {
     contextGenerationRef.current += 1;
     activeChatAbortRef.current?.abort();
     activeChatAbortRef.current = null;
+    trainingVisualAbortRef.current?.abort();
+    trainingVisualAbortRef.current = null;
     processingChatRef.current = false;
     replaceQueuedChatMessages(() => []);
     closeTrackingEventSources();
@@ -892,7 +1052,6 @@ export default function Home() {
     setTrackingStatus("");
     setTrackingError("");
     setTrackingExportStatus("");
-    setShowTrackingOverlays(false);
     setVideoTimeOffset(0);
     setTimestamp(0);
     if (originalVideoUrl && videoUrl !== originalVideoUrl) {
@@ -910,6 +1069,8 @@ export default function Home() {
     contextGenerationRef.current += 1;
     activeChatAbortRef.current?.abort();
     activeChatAbortRef.current = null;
+    trainingVisualAbortRef.current?.abort();
+    trainingVisualAbortRef.current = null;
     processingChatRef.current = false;
     replaceQueuedChatMessages(() => []);
     const jobsToCancel = activeTrackingJobsRef.current;
@@ -928,9 +1089,6 @@ export default function Home() {
     setTrackingError("");
     setTrackingExporting(false);
     setTrackingExportStatus("");
-    setShowTrackingOverlays(false);
-    setTrackingEnabled(false);
-    setSendAnnotatedSnapshot(false);
     setActiveTool("cursor");
     setTextAnnotation("");
     setShowTranscript(false);
@@ -1307,6 +1465,10 @@ export default function Home() {
   async function processChatMessage(request: QueuedChatMessage) {
     if (!videoId || !videoMetadataLoaded) return;
     const requestGeneration = contextGenerationRef.current;
+    if (request.mode === "training") {
+      trainingVisualAbortRef.current?.abort();
+      trainingVisualAbortRef.current = null;
+    }
     processingChatRef.current = true;
     setLoading(true);
     setStoppingResponse(false);
@@ -1463,6 +1625,12 @@ export default function Home() {
       );
       if (request.mode === "training" && parsed.trainingProcedure?.steps.length) {
         setModelAnnotations([]);
+        void prepareTrainingVisuals(
+          assistantMessageId,
+          parsed.trainingProcedure,
+          request.model,
+          requestGeneration
+        );
       } else if (parsed.annotations.length) {
         // Render the model's normalized coordinates without a frontend offset.
         setModelAnnotations(
@@ -1561,12 +1729,8 @@ export default function Home() {
           label: target.label,
           progress: 0,
           stage: "queued",
-          color: target.color ?? "#6366f1",
+          color: target.color ?? "#3b82f6",
         }));
-
-        if (explicitTrackingRequest) {
-          setShowTrackingOverlays(true);
-        }
 
         try {
           const tracking = await startTracking({
@@ -1679,7 +1843,6 @@ export default function Home() {
                     setTrackingStatus(
                       `Added ${layerCount} tracking item${layerCount === 1 ? "" : "s"}.`
                     );
-                    setShowTrackingOverlays(true);
                   }
                 } catch (error) {
                   const message = error instanceof Error ? error.message : "Unable to load tracking masks.";
@@ -1888,7 +2051,13 @@ export default function Home() {
 
   const selectedModelLabel =
     RAGVLM_MODELS.find((model) => model.value === selectedModel)?.label ?? selectedModel;
-  const hasUnrevealedCompletedComparison = chatMessages.some(
+  const visibleChatMessages = chatMessages.filter(
+    (message) => (message.mode ?? "qna") === interactionMode
+  );
+  const visibleQueuedChatMessages = queuedChatMessages.filter(
+    (message) => message.mode === interactionMode
+  );
+  const hasUnrevealedCompletedComparison = visibleChatMessages.some(
     (message) =>
       message.comparison?.status === "complete" &&
       !message.comparison.revealed
@@ -1898,6 +2067,17 @@ export default function Home() {
   const totalTrackingCount = trackingLayers.length;
   const activeSnapshotInterval =
     timelineStatus?.snapshot_interval_seconds ?? snapshotIntervalSeconds;
+  const videoUploadPhase = ingestError
+    ? "error"
+    : ingesting || Boolean(videoId && !videoMetadataLoaded)
+      ? "processing"
+      : videoId && videoMetadataLoaded
+        ? "ready"
+        : "idle";
+  const videoUploadStatus =
+    ingestError ||
+    ingestStatus ||
+    (videoUploadPhase === "ready" ? "Video ready." : "Ready to upload a video.");
 
   return (
     <div className="op-shell">
@@ -2041,21 +2221,22 @@ export default function Home() {
                 apply when rebuilding the current index.
               </small>
             </div>
-            {ingestStatus && (
-              <p role="status" className="op-status-text">
-                {ingestStatus}
-              </p>
-            )}
-            {ingestError && (
-              <div role="alert" className="op-error-text">
-                <p style={{ margin: 0 }}>{ingestError}</p>
-                {shouldShowYoutubeCookieHelp(ingestError) && (
-                  <p style={{ margin: "6px 0 0" }}>
-                    For Docker, export YouTube browser cookies to <code>./data/ytdlp/cookies.txt</code>,
-                    set <code>YTDLP_COOKIES_FILE=/app/data/ytdlp/cookies.txt</code>, then rebuild the
-                    video service.
-                  </p>
-                )}
+            <div
+              role={videoUploadPhase === "error" ? "alert" : "status"}
+              aria-live={videoUploadPhase === "error" ? "assertive" : "polite"}
+              className={`op-upload-status op-upload-status-${videoUploadPhase}`}
+            >
+              <span className="op-upload-status-dot" aria-hidden="true" />
+              <span>{videoUploadStatus}</span>
+              {videoUploadPhase === "processing" ? (
+                <span className="op-inline-spinner" aria-hidden="true" />
+              ) : null}
+            </div>
+            {ingestError && shouldShowYoutubeCookieHelp(ingestError) && (
+              <div className="op-upload-error-help">
+                For Docker, export YouTube browser cookies to <code>./data/ytdlp/cookies.txt</code>,
+                set <code>YTDLP_COOKIES_FILE=/app/data/ytdlp/cookies.txt</code>, then rebuild the
+                video service.
               </div>
             )}
           </div>
@@ -2477,10 +2658,16 @@ export default function Home() {
               hidden={!controlsExpanded}
             >
           <div id="op-tracking-controls" className="op-card">
-            <div className="op-sidebar-section-header">
-              <h2 className="op-card-title" style={{ margin: 0 }}>
-                Vision &amp; Tracking Engine
-              </h2>
+            <div className="op-sidebar-section-header op-engine-header">
+              <div className="op-engine-heading">
+                <h2 className="op-card-title" style={{ margin: 0 }}>
+                  Vision &amp; Tracking Engine
+                </h2>
+                <span className="op-engine-status">
+                  <span className="op-engine-status-dot" aria-hidden="true" />
+                  Always on · Tracking, overlays &amp; snapshots
+                </span>
+              </div>
               <div className="op-inline-actions">
                 <button
                   type="button"
@@ -2507,30 +2694,6 @@ export default function Home() {
                 </button>
               </div>
             </div>
-            <label className="op-checkbox-row">
-              <input
-                type="checkbox"
-                checked={trackingEnabled}
-                onChange={(event) => setTrackingEnabled(event.target.checked)}
-              />
-              <span>Automatically use SAM3 Tracking</span>
-            </label>
-            <label className="op-checkbox-row">
-              <input
-                type="checkbox"
-                checked={showTrackingOverlays}
-                onChange={(event) => setShowTrackingOverlays(event.target.checked)}
-              />
-              <span>Show tracking items</span>
-            </label>
-            <label className="op-checkbox-row">
-              <input
-                type="checkbox"
-                checked={sendAnnotatedSnapshot}
-                onChange={(event) => setSendAnnotatedSnapshot(event.target.checked)}
-              />
-              <span>Send Annotated Snapshot</span>
-            </label>
           </div>
 
           <div id="op-document-controls" className="op-card">
@@ -2592,7 +2755,10 @@ export default function Home() {
             id="op-notes-controls"
             className="op-card"
           >
-            <h2 className="op-card-title">Additional Notes</h2>
+            <div className="op-notes-heading">
+              <h2 className="op-card-title">Additional Notes</h2>
+              <span>Included with every new message</span>
+            </div>
             <textarea
               id="additional-notes"
               className="op-chat-input op-additional-notes"
@@ -2601,7 +2767,6 @@ export default function Home() {
               rows={3}
               placeholder="i.e. machine name, specs, etc."
             />
-            <p className="op-help-text">These notes are included with every new message.</p>
           </div>
 
           <div
@@ -2631,7 +2796,16 @@ export default function Home() {
             style={{ height: `${videoDisplayHeight}px` }}
           >
             <div className="op-card-heading">
-              <h2 className="op-card-title">Conversation</h2>
+              <div className="op-conversation-heading">
+                <h2 className="op-card-title">
+                  {interactionMode === "training" ? "Training" : "Conversation"}
+                </h2>
+                <span>
+                  {interactionMode === "training"
+                    ? "Build a guided procedure"
+                    : "Ask about your video and sources"}
+                </span>
+              </div>
               <div className="op-inline-actions">
                 <button
                   type="button"
@@ -2649,7 +2823,7 @@ export default function Home() {
                   }
                   title="Clear conversation, annotations, tracking, notes, and queued work while keeping the video, transcript, PDFs, and PDF selections"
                 >
-                  Clear All Context
+                  Clear
                 </button>
                 <button
                   type="button"
@@ -2673,30 +2847,9 @@ export default function Home() {
                       strokeLinejoin="round"
                     />
                   </svg>
-                  Download chat
+                  Export
                 </button>
               </div>
-            </div>
-            <div className="op-mode-switch" role="group" aria-label="Conversation mode">
-              <button
-                type="button"
-                className={interactionMode === "qna" ? "active" : ""}
-                onClick={() => setInteractionMode("qna")}
-              >
-                Q&amp;A
-              </button>
-              <button
-                type="button"
-                className={interactionMode === "training" ? "active" : ""}
-                onClick={() => setInteractionMode("training")}
-              >
-                Training
-              </button>
-              <span>
-                {interactionMode === "training"
-                  ? "Build a guided, source-linked procedure from the video and selected manuals."
-                  : "Ask about any moment in the full video or selected manuals."}
-              </span>
             </div>
             {interactionMode === "training" && selectedDocumentIds.length === 0 && (
               <p className="op-training-source-warning">
@@ -2710,8 +2863,8 @@ export default function Home() {
             )}
             <div className="op-chat-panel">
               <div className="op-chat-history">
-                {chatMessages.length ? (
-                  chatMessages.map((message) =>
+                {visibleChatMessages.length ? (
+                  visibleChatMessages.map((message) =>
                     message.comparison ? (
                       <ComparisonTurnCard
                         key={message.id}
@@ -2733,19 +2886,15 @@ export default function Home() {
                         } ${message.trainingProcedure?.steps.length ? "op-chat-bubble-training" : ""}`}
                       >
                         <div className="op-chat-meta">
-                          <span>{message.role === "user" ? "User" : "Operator OS"}</span>
-                          {message.mode && (
-                            <span className={`op-chat-mode-badge op-chat-mode-${message.mode}`}>
-                              {message.mode === "training" ? "Training mode" : "Q&A mode"}
+                          <span>{message.role === "user" ? "You" : "OperatorOS"}</span>
+                          {message.model ? (
+                            <span>
+                              · {RAGVLM_MODELS.find((model) => model.value === message.model)?.label ?? message.model}
                             </span>
-                          )}
-                          {message.model ? <span>· {message.model}</span> : null}
-                          {message.documents?.length ? (
-                            <span>· PDF: {message.documents.join(", ")}</span>
                           ) : null}
-                          {message.role === "user"
-                            ? <span>· snapshot {message.annotatedSnapshot ? "sent" : "not sent"}</span>
-                            : null}
+                          {message.documents?.length ? (
+                            <span>· {message.documents.length} source{message.documents.length === 1 ? "" : "s"}</span>
+                          ) : null}
                         </div>
                         {message.cancelled && <div className="op-chat-stopped">Response stopped</div>}
                         {message.role === "assistant" && message.trainingProcedure?.steps.length ? (
@@ -2783,20 +2932,30 @@ export default function Home() {
                     )
                   )
                 ) : (
-                  <p className="op-chat-empty">
-                    Ask about the paused frame or a selected document to start a conversation.
-                  </p>
+                  <div className="op-chat-empty">
+                    <span className="op-chat-empty-icon" aria-hidden="true">
+                      {interactionMode === "training" ? "T" : "Q"}
+                    </span>
+                    <strong>
+                      {interactionMode === "training" ? "Start a training chat" : "Start a conversation"}
+                    </strong>
+                    <p>
+                      {interactionMode === "training"
+                        ? "Ask for a procedure and OperatorOS will build a guided, source-linked lesson."
+                        : "Ask about a moment in the video or anything in your selected manuals."}
+                    </p>
+                  </div>
                 )}
               </div>
 
               <form className="op-chat-form" onSubmit={handleAsk}>
-                {queuedChatMessages.length > 0 && (
+                {visibleQueuedChatMessages.length > 0 && (
                   <div className="op-chat-queue" aria-label="Queued messages">
                     <div className="op-chat-queue-heading">
                       <strong>Message queue</strong>
-                      <span>{queuedChatMessages.length}</span>
+                      <span>{visibleQueuedChatMessages.length}</span>
                     </div>
-                    {queuedChatMessages.map((queuedMessage, index) => (
+                    {visibleQueuedChatMessages.map((queuedMessage, index) => (
                       <div className="op-chat-queue-item" key={queuedMessage.id}>
                         <span className="op-chat-queue-number">{index + 1}</span>
                         <textarea
@@ -2828,7 +2987,7 @@ export default function Home() {
                     ))}
                   </div>
                 )}
-                <div className="op-chat-input-row">
+                <div className="op-chat-composer">
                   <textarea
                     className="op-chat-input"
                     value={question}
@@ -2842,45 +3001,121 @@ export default function Home() {
                     rows={2}
                     placeholder={interactionMode === "training" ? "What procedure should I learn?" : "Ask anything about the full video..."}
                   />
-                  <button
-                    type="button"
-                    className={`op-microphone-button ${recordingSpeech ? "recording" : ""}`}
-                    onClick={recordingSpeech ? stopSpeechRecording : () => void startSpeechRecording()}
-                    disabled={transcribingSpeech}
-                    aria-label={recordingSpeech ? "Stop voice recording" : "Dictate question"}
-                    title={recordingSpeech ? "Stop recording" : "Dictate with microphone"}
-                  >
-                    {transcribingSpeech ? "…" : recordingSpeech ? "■" : "🎙"}
-                  </button>
-                  {loading && activeChatAbortRef.current && (
-                    <button
-                      type="button"
-                      className="op-stop-button"
-                      onClick={stopActiveResponse}
-                      disabled={stoppingResponse}
+                  <div className="op-chat-composer-footer">
+                    <details
+                      className="op-mode-picker"
+                      ref={modeSelectorRef}
+                      onBlur={(event) => {
+                        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                          event.currentTarget.removeAttribute("open");
+                        }
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          event.currentTarget.removeAttribute("open");
+                          event.currentTarget.querySelector("summary")?.focus();
+                        }
+                      }}
                     >
-                      {stoppingResponse ? "Stopping..." : "Stop"}
-                    </button>
-                  )}
-                  <button
-                    type="submit"
-                    className="op-send-button"
-                    aria-label={loading ? "Queue message" : "Send question"}
-                    disabled={
-                      ingesting ||
-                      hasUnrevealedCompletedComparison ||
-                      (!videoId || !videoMetadataLoaded)
-                    }
-                  >
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
-                      <path
-                        d="M4 12 L20 4 L14 20 L12 13 Z"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  </button>
+                      <summary
+                        aria-label={`Change conversation mode. Current mode: ${interactionMode === "training" ? "Training" : "Q&A"}`}
+                      >
+                        <span className="op-mode-picker-icon" aria-hidden="true">
+                          {interactionMode === "training" ? "T" : "Q"}
+                        </span>
+                        <span>{interactionMode === "training" ? "Training" : "Q&A"}</span>
+                        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
+                          <path
+                            d="m4 6 4 4 4-4"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </summary>
+                      <div className="op-mode-menu" role="menu" aria-label="Conversation mode">
+                        {([
+                          ["qna", "Q&A", "Ask about the video or selected sources"],
+                          ["training", "Training", "Build a guided, source-linked procedure"],
+                        ] as const).map(([mode, label, description]) => (
+                          <button
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={interactionMode === mode}
+                            className={interactionMode === mode ? "active" : ""}
+                            key={mode}
+                            onClick={() => {
+                              setInteractionMode(mode);
+                              modeSelectorRef.current?.removeAttribute("open");
+                            }}
+                          >
+                            <span className="op-mode-option-icon" aria-hidden="true">
+                              {mode === "training" ? "T" : "Q"}
+                            </span>
+                            <span>
+                              <strong>{label}</strong>
+                              <small>{description}</small>
+                            </span>
+                            {interactionMode === mode ? (
+                              <span className="op-mode-check" aria-hidden="true">✓</span>
+                            ) : null}
+                          </button>
+                        ))}
+                      </div>
+                    </details>
+                    <div className="op-composer-actions">
+                      <button
+                        type="button"
+                        className={`op-microphone-button ${recordingSpeech ? "recording" : ""}`}
+                        onClick={recordingSpeech ? stopSpeechRecording : () => void startSpeechRecording()}
+                        disabled={transcribingSpeech}
+                        aria-label={recordingSpeech ? "Stop voice recording" : "Dictate question"}
+                        title={recordingSpeech ? "Stop recording" : "Dictate with microphone"}
+                      >
+                        {transcribingSpeech ? (
+                          <span className="op-inline-spinner" aria-hidden="true" />
+                        ) : recordingSpeech ? (
+                          <span className="op-recording-stop" aria-hidden="true" />
+                        ) : (
+                          <svg viewBox="0 0 20 20" width="16" height="16" fill="none" aria-hidden="true">
+                            <rect x="7" y="2.5" width="6" height="10" rx="3" stroke="currentColor" strokeWidth="1.5" />
+                            <path d="M4.5 9.5a5.5 5.5 0 0 0 11 0M10 15v2.5M7.5 17.5h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                          </svg>
+                        )}
+                      </button>
+                      {loading && activeChatAbortRef.current && (
+                        <button
+                          type="button"
+                          className="op-stop-button"
+                          onClick={stopActiveResponse}
+                          disabled={stoppingResponse}
+                        >
+                          {stoppingResponse ? "Stopping..." : "Stop"}
+                        </button>
+                      )}
+                      <button
+                        type="submit"
+                        className="op-send-button"
+                        aria-label={loading ? "Queue message" : "Send question"}
+                        disabled={
+                          ingesting ||
+                          hasUnrevealedCompletedComparison ||
+                          (!videoId || !videoMetadataLoaded)
+                        }
+                      >
+                        <svg viewBox="0 0 20 20" width="16" height="16" fill="none" aria-hidden="true">
+                          <path
+                            d="M10 15V5m0 0L6.5 8.5M10 5l3.5 3.5"
+                            stroke="currentColor"
+                            strokeWidth="1.7"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
                 </div>
                 {speechError && <p className="op-error-text">{speechError}</p>}
               </form>

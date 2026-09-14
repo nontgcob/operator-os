@@ -3,7 +3,7 @@
 import type { ComponentType } from "react";
 import type { AnnotationType } from "@/lib/types";
 
-const PALETTE = ["#ef4444", "#86efac", "#fde047", "#c4b5fd", "#ffffff"];
+const PALETTE = ["#ef4444", "#86efac", "#fde047", "#93c5fd", "#ffffff"];
 
 const iconStyle = { height: 16, width: 16 } as const;
 
@@ -70,6 +70,22 @@ const IconText = () => (
   </svg>
 );
 
+const IconUndo = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={iconStyle}>
+    <path d="M6 3.5 2.5 7 6 10.5" />
+    <path d="M3 7h4.5A5.5 5.5 0 0 1 13 12.5" />
+  </svg>
+);
+
+const IconTrash = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={iconStyle}>
+    <path d="M2.5 4.5h11" />
+    <path d="M6 2.5h4l.7 2H5.3l.7-2Z" />
+    <path d="m4.5 4.5.6 9h5.8l.6-9" />
+    <path d="M6.7 7v4M9.3 7v4" />
+  </svg>
+);
+
 export const ANNOTATION_TOOLS: Array<{
   type: AnnotationType;
   label: string;
@@ -115,15 +131,7 @@ export function AnnotationControls({
 }: AnnotationControlsProps) {
   return (
     <div className="op-card" style={{ marginTop: 14 }}>
-      <div className="op-annotation-header">
-        <h2 className="op-card-title" style={{ margin: 0 }}>
-          Annotation Tools
-        </h2>
-        <div className="op-status-pill">
-          <span className="op-status-dot" aria-hidden="true" />
-          All system operational
-        </div>
-      </div>
+      <h2 className="op-card-title">Annotation Tools</h2>
 
       <div className="op-tool-row">
         {ANNOTATION_TOOLS.map(({ Icon, ...tool }) => (
@@ -139,11 +147,27 @@ export function AnnotationControls({
             <Icon />
           </button>
         ))}
-        <button type="button" className="op-secondary-button" disabled={!canUndo} onClick={onUndo}>
-          Undo
+        <button
+          type="button"
+          className="op-tool-button op-tool-action-button"
+          disabled={!canUndo}
+          aria-label="Undo"
+          title="Undo last annotation"
+          onClick={onUndo}
+        >
+          <IconUndo />
+          <span>Undo</span>
         </button>
-        <button type="button" className="op-danger-text" disabled={!annotationsCount} onClick={onClear}>
-          Clear
+        <button
+          type="button"
+          className="op-tool-button op-tool-action-button op-tool-button-danger"
+          disabled={!annotationsCount}
+          aria-label="Clear annotations"
+          title="Clear all annotations"
+          onClick={onClear}
+        >
+          <IconTrash />
+          <span>Clear</span>
         </button>
       </div>
 
